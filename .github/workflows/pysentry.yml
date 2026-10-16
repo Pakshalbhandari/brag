@@ -1,0 +1,45 @@
+name: PySentry dependency audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/pysentry.yml
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/pysentry.yml
+  # New advisories get published for versions you already have, so re-check weekly too.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Run PySentry
+        run: |
+          set +e
+          uvx --from pysentry-rs==0.5.0 pysentry-rs . \
+            --format markdown --output pysentry-report.md --fail-on high
+          status=$?
+          cat pysentry-report.md >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pysentry-report
+          path: pysentry-report.md
