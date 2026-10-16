@@ -1,5 +1,5 @@
 [project]
-name = "chatbot"
+name = "brag"
 version = "0.1.0"
 description = "RAG over DOCX/PPTX/XLSX with Docling, Chonkie and RAG-Anything"
 requires-python = ">=3.12"
