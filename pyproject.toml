@@ -1,0 +1,14 @@
+[project]
+name = "chatbot"
+version = "0.1.0"
+description = "RAG over DOCX/PPTX/XLSX with Docling, Chonkie and RAG-Anything"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.14.0",
+    "chonkie>=1.7.0",
+    "docling>=2.139.0",
+    "openpyxl>=3.1.5",
+    "python-dotenv>=1.2.4",
+    "raganything>=1.4.2",
+    "sentence-transformers>=6.1.0",
+]
