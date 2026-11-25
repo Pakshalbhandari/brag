@@ -28,13 +28,34 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
+      # Accepted findings. Each names why brag is not exposed; review them
+      # whenever raganything, lightrag-hku or torch is upgraded.
+      #
+      # lightrag-hku: fixed in 1.5.4/1.5.5, but every raganything release (up to
+      # 1.4.4) requires lightrag-hku<1.5. All four are in LightRAG's API server and
+      # web UI (the lightrag.api package), which brag never imports or runs; brag
+      # uses LightRAG as a library. Remove these once raganything allows 1.5.
+      #   PYSEC-2026-3474  CORS wildcard with credentials (API server)
+      #   PYSEC-2026-3475  hardcoded token secret, auth bypass (API server)
+      #   PYSEC-2026-4062  no rate limiting on /login (API server)
+      #   PYSEC-2026-4064  SSRF in the markdown image-download guard (no such code in 1.4.16's core library)
+      #
+      # torch: no fixed release exists. --ignore-while-no-fix makes the finding
+      # fail the build again as soon as one does.
+      #   PYSEC-2025-189   reported against torch 2.6.0 (torch.jit / CUDA); brag only runs embedding inference
       - name: Run PySentry
+        env:
+          ACCEPTED: >-
+            --ignore PYSEC-2026-3474 --ignore PYSEC-2026-3475
+            --ignore PYSEC-2026-4062 --ignore PYSEC-2026-4064
+            --ignore-while-no-fix PYSEC-2025-189
         run: |
           set +e
-          uvx --from pysentry-rs==0.5.0 pysentry-rs . \
+          uvx --from pysentry-rs==0.5.0 pysentry-rs . $ACCEPTED \
             --format markdown --output pysentry-report.md --fail-on high
           status=$?
-          cat pysentry-report.md >> "$GITHUB_STEP_SUMMARY"
+          # The job summary is capped at 1 MiB; the full report is uploaded below.
+          head -c 900000 pysentry-report.md >> "$GITHUB_STEP_SUMMARY"
           exit $status
 
       - name: Upload report

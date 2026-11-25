@@ -25,6 +25,10 @@ class Settings:
     working_dir: Path = field(default_factory=lambda: Path(_env("WORKING_DIR", "./rag_storage")))
     output_dir: Path = field(default_factory=lambda: Path(_env("OUTPUT_DIR", "./output")))
 
+    # Entity types for the knowledge graph, written by `brag ontology propose`.
+    # Used when the file exists; otherwise ENTITY_TYPES or LightRAG's defaults.
+    ontology_file: Path = field(default_factory=lambda: Path(_env("ONTOLOGY_FILE", "./ontology.yaml")))
+
     # Claude (LLM + vision)
     llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "claude-opus-5-5"))
     llm_effort: str = field(default_factory=lambda: _env("LLM_EFFORT", "medium"))
@@ -51,6 +55,11 @@ class Settings:
 
     # Images smaller than this (either side, px) are treated as icons and skipped.
     min_image_px: int = field(default_factory=lambda: int(_env("MIN_IMAGE_PX", "64")))
+
+    @property
+    def manifest_file(self) -> Path:
+        """Which file is indexed under which document ID (see manifest.py)."""
+        return Path(self.working_dir) / "brag_manifest.json"
 
     @property
     def lightrag_chunk_token_size(self) -> int:

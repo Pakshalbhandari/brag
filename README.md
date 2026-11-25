@@ -89,7 +89,7 @@ flowchart TB
     ANS -. calls .-> CL4
 ```
 
-Each Chonkie chunk ends with a `␞` separator, and LightRAG is told to split only on it, so LightRAG keeps Chonkie's chunk boundaries instead of re-chunking. Documents get IDs from a hash of their contents, so re-ingesting an unchanged file is a no-op.
+Each Chonkie chunk ends with a `␞` separator, and LightRAG is told to split only on it, so LightRAG keeps Chonkie's chunk boundaries instead of re-chunking. Documents get IDs from a hash of their contents, so re-ingesting an unchanged file is a no-op. A manifest (`rag_storage/brag_manifest.json`) records which file holds which document, so an edited file replaces its old version instead of sitting next to it.
 
 ## Installation
 
@@ -116,14 +116,39 @@ uv run brag --help
 ## Usage
 
 ```bash
-brag parse samples/sales.xlsx        # preview chunks; no API calls
-brag ingest samples/ ~/Docs/q3.pptx   # files and/or folders (recursive)
+brag parse samples/sales.xlsx          # preview chunks; no API calls
+brag ontology propose samples/         # optional: entity types for this corpus
+brag ingest samples/ ~/Docs/q3.pptx    # files and/or folders (recursive)
 brag query "Which region grew fastest?"
 brag query "Summarise the Widget Pro launch" --mode hybrid
 brag chat
 ```
 
-Query modes: `mix` (graph + vector, default), `hybrid`, `local`, `global`, `naive` (vector only).
+Query modes: `mix` (graph + vector, default), `hybrid`, `local`, `global`, `naive` (vector only). Answers end with a References section listing the files and the slides, sheets or pages each fact came from.
+
+### Keeping the index in sync
+
+```bash
+brag ingest samples/            # re-run any time: new files are added, edited ones replaced
+brag list                       # what is indexed, and which files no longer exist
+brag remove samples/old.pptx    # drop a file, or every file under a folder
+```
+
+`brag ingest` prints one line per file (`indexed`, `updated`, `unchanged`, `empty` or `failed`), the token usage, and exits with status 1 if any file failed, so it can run in scripts and CI. Files are named in the index by their path relative to where you run `brag`, so run it from the same folder each time.
+
+Indexes built with brag 0.1 have no manifest. Their unchanged files are picked up on the next ingest; for files edited since, start over (`rm -rf rag_storage output`, then ingest).
+
+### Entity types (ontology)
+
+LightRAG tags entities with generic types (person, organization, location, event, concept, …). For a specific corpus, types such as `Product`, `SalesRegion` or `FinancialMetric` give a more useful graph:
+
+```bash
+brag ontology propose samples/   # samples the files, asks Claude, writes ontology.yaml
+```
+
+Review and edit `ontology.yaml`. Only the type `name`s are used for extraction; descriptions and examples are there to help you decide. Re-running `propose` on new documents only adds types, so your edits stay. To keep a type you deleted from coming back, list it under `rejected`. When `ontology.yaml` exists, `brag ingest` uses it. Changing types after ingesting only affects documents indexed afterwards, so re-index for a consistent graph; brag warns when the types differ from the ones the index was built with.
+
+The approach (an LLM proposes a schema from samples of the data, a person reviews it, re-runs keep edits) follows [NVIDIA auto-ontology](https://github.com/NVIDIA/auto-ontology), which does this for relational databases.
 
 The index is stored in `./rag_storage` and parsed images in `./output`, relative to the current directory (set `WORKING_DIR` / `OUTPUT_DIR` to change this).
 
@@ -136,8 +161,10 @@ from brag import RAGPipeline
 load_dotenv()  # optional: the library reads settings from the environment only
 
 pipeline = RAGPipeline()
-await pipeline.ingest(["docs/"])
+for result in await pipeline.ingest(["docs/"]):
+    print(result.source, result.status, result.error)
 answer = await pipeline.query("What is the Q4 outlook?")
+await pipeline.remove(["docs/old.pptx"])
 await pipeline.close()
 ```
 
@@ -159,6 +186,9 @@ All settings are environment variables; see `.env.example`. The main ones:
 - `CHUNK_SIZE`: Chonkie chunk size in `o200k_base` tokens. LightRAG's limit is set 256 tokens higher to leave room for the breadcrumb.
 - `TABLE_MODAL_MAX_ROWS`: the cutoff between analysing a table as one unit and row-chunking it.
 - `KG_LANGUAGE`: the language the knowledge graph is written in. Changing it after ingestion mixes languages in the graph, so re-index if you change it.
+- `ONTOLOGY_FILE`: where entity types are read from (default `./ontology.yaml`). Without the file, `ENTITY_TYPES` (a JSON list) or LightRAG's defaults apply.
+
+Entity extraction sends the same long instructions with every chunk, so the system prompt is sent with prompt caching: after the first chunk it is read from cache at a fraction of the input price. `brag ingest` reports how much input was served from cache.
 
 Requests use Claude's server-side refusal fallback (`fallbacks="default"`). If a safety classifier declines a request, it is retried on a fallback model.
 
@@ -169,9 +199,19 @@ src/brag/cli.py           `brag` command
 src/brag/config.py        settings
 src/brag/parsing.py       Docling → Chonkie → RAG-Anything content list
 src/brag/multilingual.py  Unicode normalisation + European chunking rules
-src/brag/models.py        Claude LLM/vision + local embedding functions
-src/brag/pipeline.py      RAGAnything wiring, ingest, query
+src/brag/models.py        Claude LLM/vision (prompt caching, token usage) + local embeddings
+src/brag/pipeline.py      LightRAG + RAG-Anything wiring: ingest, update, remove, query
+src/brag/manifest.py      which file is indexed under which document ID
+src/brag/ontology.py      entity-type proposal and ontology.yaml
+tests/                    pytest suite; no API key or model download needed
 samples/                  example files in English, German, French, Greek and Polish
+```
+
+## Development
+
+```bash
+uv sync
+uv run pytest
 ```
 
 ## Releasing
