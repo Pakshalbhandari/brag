@@ -7,6 +7,7 @@
 import asyncio
 import base64
 import logging
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -65,30 +66,77 @@ def _convert_openai_messages(messages: list[dict[str, Any]]) -> tuple[str | None
     return ("\n\n".join(p for p in system_parts if p) or None), converted
 
 
+@dataclass
+class TokenUsage:
+    """Running totals across every Claude call, to show what an ingest cost."""
+
+    requests: int = 0
+    input_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    output_tokens: int = 0
+
+    def add(self, usage: Any) -> None:
+        self.requests += 1
+        self.input_tokens += usage.input_tokens or 0
+        self.cache_write_tokens += getattr(usage, "cache_creation_input_tokens", None) or 0
+        self.cache_read_tokens += getattr(usage, "cache_read_input_tokens", None) or 0
+        self.output_tokens += usage.output_tokens or 0
+
+    def summary(self) -> str:
+        total_in = self.input_tokens + self.cache_write_tokens + self.cache_read_tokens
+        cached = f"{self.cache_read_tokens / total_in:.0%}" if total_in else "0%"
+        return (
+            f"{self.requests} Claude requests: {total_in:,} input tokens ({cached} read from cache), "
+            f"{self.output_tokens:,} output tokens"
+        )
+
+
+def _system_blocks(system: str) -> list[dict[str, Any]]:
+    # LightRAG's entity-extraction system prompt (instructions, entity types,
+    # examples) is identical for every chunk; only the user turn changes. Caching
+    # it makes every chunk after the first read it at a fraction of the price.
+    # Prompts under the model's minimum cacheable length are simply not cached.
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
 class ClaudeModels:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = anthropic.AsyncAnthropic()
+        self.usage = TokenUsage()
 
-    async def _create(self, messages: list[dict[str, Any]], system: str | None) -> str:
+    async def _create(
+        self, messages: list[dict[str, Any]], system: str | None, output_format: dict[str, Any] | None = None
+    ) -> str:
         kwargs: dict[str, Any] = {}
         if system:
-            kwargs["system"] = system
+            kwargs["system"] = _system_blocks(system)
+        output_config: dict[str, Any] = {"effort": self.settings.llm_effort}
+        if output_format:
+            output_config["format"] = output_format
         response = await self.client.beta.messages.create(
             model=self.settings.llm_model,
             max_tokens=self.settings.llm_max_tokens,
-            output_config={"effort": self.settings.llm_effort},
+            output_config=output_config,
             # Re-run on a fallback model if a safety classifier declines the request.
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
             messages=messages,
             **kwargs,
         )
+        self.usage.add(response.usage)
         if response.stop_reason == "refusal":
             logger.warning("Claude declined a request (%s)", response.stop_details)
         elif response.stop_reason == "max_tokens":
             logger.warning("Claude response truncated at max_tokens=%d", self.settings.llm_max_tokens)
         return "".join(b.text for b in response.content if b.type == "text")
+
+    async def complete_json(self, system: str, prompt: str, schema: dict[str, Any]) -> str:
+        """One request whose reply is JSON matching ``schema`` (structured outputs)."""
+        return await self._create(
+            [{"role": "user", "content": prompt}], system, {"type": "json_schema", "schema": schema}
+        )
 
     async def complete(
         self,

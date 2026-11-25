@@ -1,15 +1,19 @@
 """CLI for the DOCX/PPTX/XLSX RAG pipeline.
 
     brag parse samples/report.docx      # preview chunks, no API calls
-    brag ingest samples/                # parse + index files/folders
+    brag ontology propose samples/      # suggest entity types -> ontology.yaml
+    brag ingest samples/                # index files/folders; re-run to pick up edits
     brag query "What drove Q3 growth?"  # one question
     brag chat                           # interactive Q&A
+    brag list                           # indexed files
+    brag remove samples/old.pptx        # drop files (or folders) from the index
 """
 
 import argparse
 import asyncio
 import json
 import logging
+import sys
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -18,7 +22,7 @@ from . import __version__
 MODES = ["mix", "hybrid", "local", "global", "naive"]
 
 
-def cmd_parse(args: argparse.Namespace) -> None:
+def cmd_parse(args: argparse.Namespace) -> int:
     from .config import Settings
     from .parsing import CHUNK_SEPARATOR, DocumentParser
     from .pipeline import collect_files
@@ -35,21 +39,102 @@ def cmd_parse(args: argparse.Namespace) -> None:
             body = body.replace(CHUNK_SEPARATOR, "").rstrip()
             print(f"--- {item['type']} (page_idx={item.get('page_idx')})")
             print(body[:400] + (" …" if len(body) > 400 else ""))
+    return 0
 
 
-async def cmd_ingest(args: argparse.Namespace) -> None:
+async def cmd_ontology_propose(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .config import Settings
+    from .models import ClaudeModels
+    from .ontology import Ontology, collect_samples, propose
+    from .parsing import DocumentParser
+    from .pipeline import collect_files
+
+    settings = Settings()
+    files = collect_files(args.paths)
+    if not files:
+        print("No supported files found.", file=sys.stderr)
+        return 1
+    path = Path(settings.ontology_file)
+    ontology = Ontology.load(path) if path.exists() else Ontology()
+
+    print(f"Sampling {len(files)} file(s)...")
+    samples = collect_samples(DocumentParser(settings), files)
+    models = ClaudeModels(settings)
+    proposed = await propose(models, samples)
+    added = ontology.merge(proposed)
+    ontology.save(path)
+
+    if added:
+        print(f"Added {len(added)} entity type(s) to {path}:")
+        for t in added:
+            print(f"  {t.name:<22} {t.description}")
+    else:
+        print(f"No new entity types; {path} already covers the proposal.")
+    print(f"\n{len(ontology.entity_types)} types in total. Review and edit {path}, then run `brag ingest`.")
+    print(models.usage.summary())
+    return 0
+
+
+async def cmd_ingest(args: argparse.Namespace) -> int:
     from .pipeline import RAGPipeline
 
     pipeline = RAGPipeline()
     try:
         results = await pipeline.ingest(args.paths)
-        for r in results:
-            print(f"Indexed {r.source.name}: {r.stats}")
     finally:
         await pipeline.close()
 
+    if not results:
+        print("No supported files found.", file=sys.stderr)
+        return 1
+    for r in results:
+        detail = r.error if r.status == "failed" else (r.stats or "")
+        print(f"{r.status:<10} {r.source.name}  {detail}".rstrip())
+    failed = sum(r.status == "failed" for r in results)
+    counts = {s: sum(r.status == s for r in results) for s in ("indexed", "updated", "unchanged", "empty", "failed")}
+    print("\n" + ", ".join(f"{n} {s}" for s, n in counts.items() if n))
+    if pipeline.models.usage.requests:
+        print(pipeline.models.usage.summary())
+    if failed:
+        print(f"{failed} file(s) failed; run with -v for details.", file=sys.stderr)
+    return 1 if failed else 0
 
-async def cmd_query(args: argparse.Namespace) -> None:
+
+async def cmd_remove(args: argparse.Namespace) -> int:
+    from .pipeline import RAGPipeline
+
+    pipeline = RAGPipeline()
+    try:
+        results = await pipeline.remove(args.paths)
+    finally:
+        await pipeline.close()
+    if not results:
+        print("None of these files are in the index.", file=sys.stderr)
+        return 1
+    for r in results:
+        print(f"{'removed' if r.ok else 'failed':<8} {r.label}  {r.error or ''}".rstrip())
+    return 0 if all(r.ok for r in results) else 1
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .config import Settings
+    from .manifest import Manifest
+
+    manifest = Manifest.load(Settings().manifest_file)
+    if not manifest.files:
+        print("The index is empty.")
+        return 0
+    for key, entry in sorted(manifest.files.items(), key=lambda kv: kv[1].label):
+        missing = "" if Path(key).exists() else "  (file no longer exists; `brag remove` it)"
+        print(f"{entry.indexed_at}  {entry.label}{missing}")
+    return 0
+
+
+async def cmd_query(args: argparse.Namespace) -> int:
     from .pipeline import RAGPipeline
 
     pipeline = RAGPipeline()
@@ -57,9 +142,10 @@ async def cmd_query(args: argparse.Namespace) -> None:
         print(await pipeline.query(args.question, mode=args.mode))
     finally:
         await pipeline.close()
+    return 0
 
 
-async def cmd_chat(args: argparse.Namespace) -> None:
+async def cmd_chat(args: argparse.Namespace) -> int:
     from .pipeline import RAGPipeline
 
     pipeline = RAGPipeline()
@@ -74,6 +160,7 @@ async def cmd_chat(args: argparse.Namespace) -> None:
             print(await pipeline.query(question, mode=args.mode))
     finally:
         await pipeline.close()
+    return 0
 
 
 def main() -> None:
@@ -86,8 +173,18 @@ def main() -> None:
     p.add_argument("paths", nargs="+")
     p.add_argument("--json", action="store_true", help="Print the full RAG-Anything content list")
 
-    p = sub.add_parser("ingest", help="Parse and index documents")
+    p = sub.add_parser("ontology", help="Manage the knowledge graph's entity types")
+    osub = p.add_subparsers(dest="ontology_command", required=True)
+    op = osub.add_parser("propose", help="Suggest entity types from sample documents (adds to ontology.yaml)")
+    op.add_argument("paths", nargs="+")
+
+    p = sub.add_parser("ingest", help="Index documents; edited files replace their old version")
     p.add_argument("paths", nargs="+")
+
+    p = sub.add_parser("remove", help="Remove files, or every file under folders, from the index")
+    p.add_argument("paths", nargs="+")
+
+    sub.add_parser("list", help="List indexed files")
 
     p = sub.add_parser("query", help="Ask one question")
     p.add_argument("question")
@@ -102,9 +199,15 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
     if args.command == "parse":
-        cmd_parse(args)
+        code = cmd_parse(args)
+    elif args.command == "list":
+        code = cmd_list(args)
+    elif args.command == "ontology":
+        code = asyncio.run(cmd_ontology_propose(args))
     else:
-        asyncio.run({"ingest": cmd_ingest, "query": cmd_query, "chat": cmd_chat}[args.command](args))
+        handlers = {"ingest": cmd_ingest, "remove": cmd_remove, "query": cmd_query, "chat": cmd_chat}
+        code = asyncio.run(handlers[args.command](args))
+    sys.exit(code)
 
 
 if __name__ == "__main__":
