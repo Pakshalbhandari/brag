@@ -91,6 +91,14 @@ class RAGPipeline:
         return results
 
     async def query(self, question: str, mode: str = "mix", **kwargs) -> str:
+        # RAG-Anything only builds its LightRAG instance lazily during ingestion,
+        # so a fresh process has to load the existing index before querying.
+        working_dir = Path(self.settings.working_dir)
+        if not working_dir.is_dir() or not any(working_dir.glob("kv_store_*.json")):
+            raise RuntimeError(f"No index found in {working_dir}/. Run `brag ingest <paths>` first.")
+        result = await self.rag._ensure_lightrag_initialized()
+        if isinstance(result, dict) and not result.get("success", True):
+            raise RuntimeError(f"Failed to load index: {result.get('error')}")
         return await self.rag.aquery(question, mode=mode, **kwargs)
 
     async def close(self) -> None:

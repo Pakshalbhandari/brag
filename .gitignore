@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.env
+dist/
+build/
+*.egg-info/
+
+# Runtime data created by the pipeline
+rag_storage/
+output/

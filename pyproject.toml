@@ -1,8 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
 [project]
-name = "brag"
-version = "0.1.0"
+# "brag" is already taken on PyPI, so the distribution is published as
+# "brag-rag". The import name and CLI command are both "brag".
+name = "brag-rag"
+dynamic = ["version"]
 description = "RAG over DOCX/PPTX/XLSX with Docling, Chonkie and RAG-Anything"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Pakshal" }]
+keywords = ["rag", "retrieval-augmented-generation", "docling", "lightrag", "raganything", "office", "docx", "pptx", "xlsx", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
 dependencies = [
     "anthropic>=1.14.0",
     "chonkie>=1.7.0",
@@ -11,4 +34,27 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "raganything>=1.4.2",
     "sentence-transformers>=6.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Pakshalbhandari/brag"
+Repository = "https://github.com/Pakshalbhandari/brag"
+Issues = "https://github.com/Pakshalbhandari/brag/issues"
+
+[project.scripts]
+brag = "brag.cli:main"
+
+[tool.hatch.version]
+path = "src/brag/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/brag"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/brag",
+    "README.md",
+    "pyproject.toml",
+    ".env.example",
+    "LICENSE",
 ]
