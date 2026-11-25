@@ -34,7 +34,10 @@ jobs:
           uvx --from pysentry-rs==0.5.0 pysentry-rs . \
             --format markdown --output pysentry-report.md --fail-on high
           status=$?
-          cat pysentry-report.md >> "$GITHUB_STEP_SUMMARY"
+          # The job summary is capped at 1 MiB, so it gets the compact report;
+          # the full report is uploaded as an artifact below.
+          uvx --from pysentry-rs==0.5.0 pysentry-rs . --compact 2>&1 \
+            | head -c 900000 >> "$GITHUB_STEP_SUMMARY"
           exit $status
 
       - name: Upload report
