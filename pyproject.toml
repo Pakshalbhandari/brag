@@ -31,10 +31,17 @@ dependencies = [
     "chonkie>=1.7.0",
     "docling>=2.139.0",
     "openpyxl>=3.1.5",
+    "lightrag-hku>=1.4.16,<1.5",
     "python-dotenv>=1.2.4",
-    "raganything>=1.4.2",
+    "pyyaml>=6.0",
+    # brag uses RAG-Anything's and LightRAG's storage layout and multimodal-status
+    # cache; cap at the next minor so an upgrade cannot break installed copies.
+    "raganything>=1.4.2,<1.5",
     "sentence-transformers>=6.1.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
 
 [project.urls]
 Homepage = "https://github.com/Pakshalbhandari/brag"
@@ -58,3 +65,6 @@ include = [
     ".env.example",
     "LICENSE",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

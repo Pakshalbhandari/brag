@@ -58,6 +58,22 @@ TABLE_PREVIEW_ROWS = 20
 MAX_BREADCRUMB_CHARS = 200
 
 
+def file_doc_id(path: str | Path) -> str:
+    """Document ID from the file's bytes: unchanged files keep their ID, edited ones get a new one."""
+    return "doc-" + hashlib.sha256(Path(path).read_bytes()).hexdigest()[:32]
+
+
+def source_label(path: str | Path) -> str:
+    """How a file is named in the index and in citations: relative to the working
+    directory when it is inside it, so two report.docx files in different folders
+    stay distinguishable; absolute otherwise."""
+    path = Path(path).resolve()
+    try:
+        return path.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 @dataclass
 class ParsedDocument:
     source: Path
@@ -89,7 +105,7 @@ class DocumentParser:
             raise ValueError(f"Unsupported file type: {path.name}")
 
         doc = self.converter.convert(path).document
-        doc_id = "doc-" + hashlib.sha256(path.read_bytes()).hexdigest()[:32]
+        doc_id = file_doc_id(path)
         image_dir = (self.settings.output_dir / "images" / doc_id).resolve()
 
         builder = _ContentListBuilder(self, doc, image_dir, unit=_location_unit(path))
