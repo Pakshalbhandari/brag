@@ -351,9 +351,8 @@ wheels = [
 ]
 
 [[package]]
-name = "brag"
-version = "0.1.0"
-source = { virtual = "." }
+name = "brag-rag"
+source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "chonkie" },

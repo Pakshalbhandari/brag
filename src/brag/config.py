@@ -1,12 +1,11 @@
-"""Runtime settings, read from environment variables (and an optional .env file)."""
+"""Runtime settings, read from environment variables.
+
+The `brag` CLI loads a .env file from the current directory first; library users
+can call `dotenv.load_dotenv()` themselves before creating `Settings`."""
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # File types Docling handles for the three Office formats this pipeline targets.
 SUPPORTED_EXTENSIONS = {

@@ -11,7 +11,7 @@ Retrieval-augmented Q&A over **DOCX, PPTX and XLSX** files, built from:
 
 ## Architecture
 
-A rendered copy is at [docs/architecture.png](docs/architecture.png), for editors that don't render Mermaid.
+A rendered copy is at [docs/architecture.png](https://github.com/Pakshalbhandari/brag/blob/main/docs/architecture.png), for editors that don't render Mermaid.
 
 ```mermaid
 flowchart TB
@@ -91,31 +91,49 @@ flowchart TB
 
 Each Chonkie chunk ends with a `␞` separator, and LightRAG is told to split only on it, so LightRAG keeps Chonkie's chunk boundaries instead of re-chunking. Documents get IDs from a hash of their contents, so re-ingesting an unchanged file is a no-op.
 
-## Setup
+## Installation
 
 ```bash
-uv sync
-cp .env.example .env   # then set ANTHROPIC_API_KEY
+pip install brag-rag        # or: uv tool install brag-rag
+```
+
+This installs the `brag` command and the `brag` Python package. Then put your API key in the environment, or in a `.env` file in the directory you run `brag` from (see [.env.example](https://github.com/Pakshalbhandari/brag/blob/main/.env.example)):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 The embedding model (`BAAI/bge-m3` by default, about 2.3 GB) downloads on first use. Switching it later means deleting `rag_storage/` and re-ingesting, because vector dimensions change.
 
+### From source
+
+```bash
+uv sync
+cp .env.example .env   # then set ANTHROPIC_API_KEY
+uv run brag --help
+```
+
 ## Usage
 
 ```bash
-uv run rag.py parse samples/sales.xlsx        # preview chunks; no API calls
-uv run rag.py ingest samples/ ~/Docs/q3.pptx   # files and/or folders (recursive)
-uv run rag.py query "Which region grew fastest?"
-uv run rag.py query "Summarise the Widget Pro launch" --mode hybrid
-uv run rag.py chat
+brag parse samples/sales.xlsx        # preview chunks; no API calls
+brag ingest samples/ ~/Docs/q3.pptx   # files and/or folders (recursive)
+brag query "Which region grew fastest?"
+brag query "Summarise the Widget Pro launch" --mode hybrid
+brag chat
 ```
 
 Query modes: `mix` (graph + vector, default), `hybrid`, `local`, `global`, `naive` (vector only).
 
+The index is stored in `./rag_storage` and parsed images in `./output`, relative to the current directory (set `WORKING_DIR` / `OUTPUT_DIR` to change this).
+
 From Python:
 
 ```python
-from rag_pipeline.pipeline import RAGPipeline
+from dotenv import load_dotenv
+from brag import RAGPipeline
+
+load_dotenv()  # optional: the library reads settings from the environment only
 
 pipeline = RAGPipeline()
 await pipeline.ingest(["docs/"])
@@ -147,11 +165,24 @@ Requests use Claude's server-side refusal fallback (`fallbacks="default"`). If a
 ## Layout
 
 ```
-rag.py                    CLI
-rag_pipeline/config.py    settings
-rag_pipeline/parsing.py   Docling → Chonkie → RAG-Anything content list
-rag_pipeline/multilingual.py  Unicode normalisation + European chunking rules
-rag_pipeline/models.py    Claude LLM/vision + local embedding functions
-rag_pipeline/pipeline.py  RAGAnything wiring, ingest, query
+src/brag/cli.py           `brag` command
+src/brag/config.py        settings
+src/brag/parsing.py       Docling → Chonkie → RAG-Anything content list
+src/brag/multilingual.py  Unicode normalisation + European chunking rules
+src/brag/models.py        Claude LLM/vision + local embedding functions
+src/brag/pipeline.py      RAGAnything wiring, ingest, query
 samples/                  example files in English, German, French, Greek and Polish
 ```
+
+## Releasing
+
+1. Bump `__version__` in `src/brag/__init__.py`.
+2. Optional dry run: run the Publish workflow by hand from the Actions tab; it uploads to [TestPyPI](https://test.pypi.org/project/brag-rag/). TestPyPI rejects re-uploads of the same version, so bump the version before each dry run.
+3. Create a GitHub release tagged `v<version>` (e.g. `v0.2.0`).
+4. The [publish workflow](https://github.com/Pakshalbhandari/brag/blob/main/.github/workflows/publish.yml) builds the sdist and wheel and uploads them to PyPI with trusted publishing.
+
+To publish by hand instead: `uv build && uv publish` (needs a PyPI API token).
+
+## License
+
+[MIT](https://github.com/Pakshalbhandari/brag/blob/main/LICENSE)
