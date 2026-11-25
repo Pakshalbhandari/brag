@@ -1,5 +1,9 @@
 # Office-document RAG
 
+[![PyPI](https://img.shields.io/pypi/v/brag-rag)](https://pypi.org/project/brag-rag/)
+[![Python](https://img.shields.io/pypi/pyversions/brag-rag)](https://pypi.org/project/brag-rag/)
+[![License: MIT](https://img.shields.io/pypi/l/brag-rag)](https://github.com/Pakshalbhandari/brag/blob/main/LICENSE)
+
 Retrieval-augmented Q&A over **DOCX, PPTX and XLSX** files, built from:
 
 | Stage | Library | Role |
@@ -97,7 +101,7 @@ Each Chonkie chunk ends with a `␞` separator, and LightRAG is told to split on
 pip install brag-rag        # or: uv tool install brag-rag
 ```
 
-This installs the `brag` command and the `brag` Python package. Then put your API key in the environment, or in a `.env` file in the directory you run `brag` from (see [.env.example](https://github.com/Pakshalbhandari/brag/blob/main/.env.example)):
+The package is published on PyPI as [`brag-rag`](https://pypi.org/project/brag-rag/). This installs the `brag` command and the `brag` Python package. Then put your API key in the environment, or in a `.env` file in the directory you run `brag` from (see [.env.example](https://github.com/Pakshalbhandari/brag/blob/main/.env.example)):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
