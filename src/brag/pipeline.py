@@ -132,7 +132,7 @@ class RAGPipeline:
         if not self._initialized:
             Path(self.settings.working_dir).mkdir(parents=True, exist_ok=True)
             await self.lightrag.initialize_storages()
-            await initialize_pipeline_status()
+            await initialize_pipeline_status(workspace=self.lightrag.workspace)
             # RAG-Anything's record of which documents had their tables and images
             # processed. Created here (RAG-Anything keeps one it is handed) so
             # removal can clear it without reaching into RAG-Anything's internals.
@@ -162,9 +162,12 @@ class RAGPipeline:
         record = await self.lightrag.doc_status.get_by_id(doc_id)
         return bool(record) and getattr(record.get("status"), "value", record.get("status")) == DocStatus.PROCESSED.value
 
-    async def ingest_file(self, path: str | Path) -> IngestResult:
+    async def ingest_file(self, path: str | Path, label: str | None = None) -> IngestResult:
+        """Index one file. ``label`` names it in citations (default: its path
+        relative to the working directory)."""
         await self.initialize()
         path = Path(path).resolve()
+        label = label or source_label(path)
         doc_id = file_doc_id(path)
         previous = self.manifest.get(path)
         stats: dict[str, int] = {}
@@ -185,7 +188,7 @@ class RAGPipeline:
                 return IngestResult(path, "empty", doc_id, stats)
             await self.rag.insert_content_list(
                 content_list=parsed.content_list,
-                file_path=source_label(path),
+                file_path=label,
                 doc_id=doc_id,
                 split_by_character=CHUNK_SEPARATOR,
                 split_by_character_only=True,
@@ -193,7 +196,7 @@ class RAGPipeline:
             if not await self._is_indexed(doc_id):
                 raise RuntimeError(f"LightRAG did not finish indexing {doc_id}")
 
-        self.manifest.set(path, doc_id, source_label(path))
+        self.manifest.set(path, doc_id, label)
         if previous is None:
             status = "indexed"
         elif previous.doc_id == doc_id:
@@ -228,7 +231,7 @@ class RAGPipeline:
         cache = self.rag.multimodal_status_cache
         await cache.delete([doc_id])
         await cache.index_done_callback()
-        shutil.rmtree(Path(self.settings.output_dir) / "images" / doc_id, ignore_errors=True)
+        shutil.rmtree(self.settings.image_dir / doc_id, ignore_errors=True)
 
     async def remove(self, paths: Iterable[str | Path]) -> list[RemoveResult]:
         """Remove files (or every indexed file under folders) from the index.

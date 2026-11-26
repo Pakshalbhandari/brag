@@ -107,9 +107,21 @@ class Settings:
     min_image_px: int = field(default_factory=lambda: int(_env("MIN_IMAGE_PX", "64")))
 
     @property
+    def index_dir(self) -> Path:
+        """Local folder for this index: the working dir, or its workspace subfolder
+        (where LightRAG's file storages put a workspace too)."""
+        return Path(self.working_dir) / self.workspace if self.workspace else Path(self.working_dir)
+
+    @property
+    def image_dir(self) -> Path:
+        """Where extracted images go, per document ID (and per workspace)."""
+        base = Path(self.output_dir) / self.workspace if self.workspace else Path(self.output_dir)
+        return base / "images"
+
+    @property
     def manifest_file(self) -> Path:
         """Which file is indexed under which document ID (see manifest.py)."""
-        return Path(self.working_dir) / "brag_manifest.json"
+        return self.index_dir / "brag_manifest.json"
 
     @property
     def lightrag_chunk_token_size(self) -> int:
