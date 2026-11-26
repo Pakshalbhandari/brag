@@ -107,7 +107,7 @@ def test_edited_file_replaces_old_version(make_pipeline, make_docx, settings):
     p = make_pipeline()
     run(p.ingest([path]))
     old_id = p.manifest.get(path).doc_id
-    (settings.output_dir / "images" / old_id).mkdir(parents=True)
+    (settings.image_dir / old_id).mkdir(parents=True)
 
     make_docx(paragraphs=("Revenue grew 25% in Q3.",))
     (result,) = run(p.ingest([path]))
@@ -115,7 +115,7 @@ def test_edited_file_replaces_old_version(make_pipeline, make_docx, settings):
     assert result.status == "updated" and result.doc_id != old_id
     assert p.lightrag.deleted == [old_id]
     assert old_id not in p.rag.multimodal_status_cache.data
-    assert not (settings.output_dir / "images" / old_id).exists()
+    assert not (settings.image_dir / old_id).exists()
     assert Manifest.load(settings.manifest_file).get(path).doc_id == result.doc_id
 
 

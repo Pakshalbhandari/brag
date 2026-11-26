@@ -115,7 +115,7 @@ class DocumentParser:
 
         doc = self.converter.convert(path).document
         doc_id = file_doc_id(path)
-        image_dir = (self.settings.output_dir / "images" / doc_id).resolve()
+        image_dir = (self.settings.image_dir / doc_id).resolve()
 
         builder = _ContentListBuilder(self, doc, image_dir, unit=_location_unit(path))
         builder.walk()

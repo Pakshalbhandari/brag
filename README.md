@@ -172,6 +172,35 @@ await pipeline.remove(["docs/old.pptx"])
 await pipeline.close()
 ```
 
+## HTTP service
+
+`brag serve` runs brag as an HTTP API for a team: people sign in with your identity provider, and each index is visible only to the groups you allow.
+
+```bash
+pip install 'brag-rag[server]'
+cp access.example.yaml access.yaml        # which groups can read and write which index
+export OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+export OIDC_AUDIENCE=api://brag
+brag serve --access access.yaml --host 0.0.0.0 --port 8000
+```
+
+- **Sign-in (OIDC).** brag checks bearer tokens from any OpenID Connect provider (Entra ID, Okta, Google, Keycloak, ...): signature against the provider's published keys, issuer, audience and expiry. Clients get the token from the provider as usual; brag has no login page. Groups come from the `groups` claim, or another claim set with `OIDC_GROUPS_CLAIM` (dotted paths such as `realm_access.roles` work).
+- **One index per permission group.** Each index in [access.example.yaml](https://github.com/Pakshalbhandari/brag/blob/main/access.example.yaml) is a separate LightRAG workspace with its own documents, graph and manifest. That is deliberate: a knowledge graph merges facts from all of its documents into shared entity summaries, so per-document filtering inside one graph would leak. Readers may query and list; writers may also upload and remove. An index someone cannot read answers 404, so its existence is not revealed.
+- **Audit log.** Every query and search (who, which index, the question, and the documents the answer was built from), upload, removal, finished job, denied request and failed sign-in is appended to `AUDIT_LOG` as JSON lines. `AUDIT_LOG_QUESTIONS=false` leaves question text out.
+
+| Method and path | Who | What |
+|---|---|---|
+| `GET /healthz` | anyone | Liveness |
+| `GET /v1/me` | signed in | The caller, their groups and the indexes they can use |
+| `POST /v1/indexes/{index}/query` | readers | `{"question": ..., "mode": "mix"}` → answer and source documents |
+| `POST /v1/indexes/{index}/retrieve` | readers | Ranked chunks without an answer |
+| `GET /v1/indexes/{index}/documents` | readers | Indexed documents |
+| `POST /v1/indexes/{index}/documents` | writers | Multipart upload (`files`); returns a job. A file with an existing name replaces the old version |
+| `DELETE /v1/indexes/{index}/documents/{name}` | writers | Remove a document; returns a job |
+| `GET /v1/jobs/{job_id}` | readers of the job's index | Upload or removal progress and per-file results |
+
+Interactive API docs are at `/docs`. Uploads and removals run in the background, one at a time per index. The service runs as a single process: jobs are kept in memory (a restart forgets finished jobs, not indexed documents), and with the default file storage the indexes live in that process. Put it behind a TLS-terminating proxy; it does not serve HTTPS itself. For local development without an identity provider, `brag serve --no-auth` gives every caller full access and only binds to a loopback address.
+
 ## Evaluation
 
 `brag eval` scores the index against a golden set of questions, so changes such as a reranker, another chunk size or a different backend can be compared with numbers instead of impressions.
@@ -235,6 +264,7 @@ src/brag/pipeline.py      LightRAG + RAG-Anything wiring: ingest, update, remove
 src/brag/manifest.py      which file is indexed under which document ID
 src/brag/ontology.py      entity-type proposal and ontology.yaml
 src/brag/evaluation.py    golden-set evaluation (recall@k, MRR, facts, groundedness)
+src/brag/service/         HTTP API: OIDC auth, per-index access, audit log, upload jobs
 eval/samples.yaml         golden questions for samples/
 tests/                    pytest suite; no API key needed (the PDF test downloads Docling's layout model once)
 samples/                  example files in English, German, French, Greek and Polish

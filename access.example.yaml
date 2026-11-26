@@ -1,0 +1,10 @@
+# Index permissions for `brag serve`. Copy to access.yaml and edit.
+# Group names are whatever your identity provider puts in the groups claim
+# (OIDC_GROUPS_CLAIM): group names in Okta/Keycloak, object IDs in Entra ID.
+indexes:
+  finance:
+    readers: [finance-team, executives]   # may query, search and list documents
+    writers: [finance-admins]             # may also upload and remove documents
+  handbook:
+    readers: ["*"]                        # any signed-in user
+    writers: [hr-admins]

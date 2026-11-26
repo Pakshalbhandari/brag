@@ -8,6 +8,7 @@
     brag list                           # indexed files
     brag remove samples/old.pptx        # drop files (or folders) from the index
     brag eval eval/samples.yaml         # retrieval metrics against a golden set
+    brag serve --access access.yaml     # HTTP API with OIDC sign-in (brag-rag[server])
 """
 
 import argparse
@@ -211,6 +212,59 @@ async def cmd_eval(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    import os
+    from pathlib import Path
+
+    try:
+        import uvicorn
+
+        from .service.access import load_access
+        from .service.app import ServiceConfig, create_app
+        from .service.audit import AuditLog
+        from .service.auth import OIDCVerifier
+    except ImportError as e:
+        print(f"The server needs extra packages ({e.name}): pip install 'brag-rag[server]'", file=sys.stderr)
+        return 1
+    from .config import Settings
+
+    issuer, audience = os.getenv("OIDC_ISSUER", ""), os.getenv("OIDC_AUDIENCE", "")
+    if args.no_auth:
+        if args.host not in LOOPBACK:
+            print("--no-auth only binds to a loopback address (127.0.0.1, ::1, localhost).", file=sys.stderr)
+            return 1
+        verifier = None
+        print("WARNING: authentication is off; every local caller can read and change every index.", file=sys.stderr)
+    elif not (issuer and audience):
+        print("Set OIDC_ISSUER and OIDC_AUDIENCE (or use --no-auth for local development).", file=sys.stderr)
+        return 1
+    else:
+        verifier = OIDCVerifier(
+            issuer, audience,
+            groups_claim=os.getenv("OIDC_GROUPS_CLAIM", "groups"),
+            jwks_url=os.getenv("OIDC_JWKS_URL") or None,
+        )
+
+    config = ServiceConfig(
+        access=load_access(args.access),
+        verifier=verifier,
+        audit=AuditLog(
+            os.getenv("AUDIT_LOG", "./brag_audit.jsonl"),
+            include_questions=os.getenv("AUDIT_LOG_QUESTIONS", "true").lower() not in {"0", "false", "no", "off"},
+        ),
+        data_dir=Path(os.getenv("BRAG_DATA_DIR", "./brag_data")).resolve(),
+        base_settings=Settings(),
+        max_upload_bytes=int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024,
+    )
+    # One worker process: indexes, job queues and LightRAG's in-memory storages
+    # live in this process.
+    uvicorn.run(create_app(config), host=args.host, port=args.port, workers=1, log_level="info")
+    return 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="brag", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -250,6 +304,12 @@ def main() -> None:
     for metric in ("recall", "mrr", "facts", "groundedness"):
         p.add_argument(f"--min-{metric}", type=float, help=f"Exit 1 if mean {metric} is below this")
 
+    p = sub.add_parser("serve", help="Run the HTTP API (needs brag-rag[server])")
+    p.add_argument("--access", default="access.yaml", help="Index permissions file (default access.yaml)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--no-auth", action="store_true", help="Development only: no sign-in, loopback addresses only")
+
     args = ap.parse_args()
     # Look for .env from the current directory upwards, not from the installed package's location.
     load_dotenv(find_dotenv(usecwd=True))
@@ -259,6 +319,8 @@ def main() -> None:
         code = cmd_parse(args)
     elif args.command == "list":
         code = cmd_list(args)
+    elif args.command == "serve":
+        code = cmd_serve(args)
     elif args.command == "ontology":
         code = asyncio.run(cmd_ontology_propose(args))
     else:

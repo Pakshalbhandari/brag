@@ -31,3 +31,12 @@ def test_storage_and_flags_from_env(monkeypatch):
     monkeypatch.setenv("PDF_OCR", "yes")
     s = Settings()
     assert s.vector_storage == "PGVectorStorage" and s.workspace == "finance" and s.pdf_ocr is True
+
+
+def test_workspace_paths(tmp_path):
+    s = Settings(working_dir=tmp_path / "store", output_dir=tmp_path / "out", workspace="")
+    assert s.manifest_file == tmp_path / "store" / "brag_manifest.json"
+    assert s.image_dir == tmp_path / "out" / "images"
+    s = Settings(working_dir=tmp_path / "store", output_dir=tmp_path / "out", workspace="finance")
+    assert s.manifest_file == tmp_path / "store" / "finance" / "brag_manifest.json"
+    assert s.image_dir == tmp_path / "out" / "finance" / "images"
