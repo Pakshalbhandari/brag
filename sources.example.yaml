@@ -1,0 +1,26 @@
+# Document sources for `brag sync sources.yaml` and `brag serve --sources sources.yaml`.
+# Credentials come from the environment; see .env.example.
+
+sources:
+  - name: finance-sp                 # used in citation labels: finance-sp/Reports/q3.docx
+    type: sharepoint
+    site_url: https://contoso.sharepoint.com/sites/Finance
+    drive: Documents                 # library name (default "Documents")
+    folder: Reports                  # optional
+    index: finance                   # optional: the service index (workspace) to sync into
+  - name: ceo-onedrive
+    type: onedrive
+    user: ceo@contoso.com
+  - name: hr-drive
+    type: gdrive
+    folder_id: 1AbCdEf...
+  - name: eng-wiki
+    type: confluence
+    base_url: https://acme.atlassian.net/wiki
+    space: ENG
+    attachments: true
+  - name: archive
+    type: gcs
+    bucket: acme-docs
+    prefix: reports/
+

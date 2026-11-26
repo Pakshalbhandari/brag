@@ -9,6 +9,10 @@ access.yaml:
       handbook:
         readers: ["*"]                        # any signed-in user
         writers: [hr-admins]
+        limits:                               # optional
+          monthly_tokens: 20000000            # Claude tokens per calendar month (queries + ingestion)
+          user_queries_per_day: 200
+          user_queries_per_minute: 10
 
 Each index is a separate LightRAG workspace, so documents never mix across
 indexes: a knowledge graph merges facts from every document it holds, so
@@ -27,10 +31,21 @@ ANY = "*"
 
 
 @dataclass(frozen=True)
+class Limits:
+    monthly_tokens: int | None = None  # input (uncached + cache writes) + output; cache reads not counted
+    user_queries_per_day: int | None = None
+    user_queries_per_minute: int | None = None
+
+
+LIMIT_KEYS = {"monthly_tokens", "user_queries_per_day", "user_queries_per_minute"}
+
+
+@dataclass(frozen=True)
 class IndexAccess:
     name: str
     readers: frozenset[str]
     writers: frozenset[str]
+    limits: Limits = Limits()
 
     def can_read(self, groups: frozenset[str]) -> bool:
         return ANY in self.readers or bool(self.readers & groups) or self.can_write(groups)
@@ -54,5 +69,11 @@ def load_access(path: str | Path) -> dict[str, IndexAccess]:
         writers = frozenset(str(g) for g in spec.get("writers") or [])
         if not readers and not writers:
             raise ValueError(f"Index {name!r} has no readers or writers")
-        access[name] = IndexAccess(name, readers, writers)
+        raw_limits = spec.get("limits") or {}
+        unknown = set(raw_limits) - LIMIT_KEYS
+        if unknown:
+            raise ValueError(f"Index {name!r}: unknown limit(s) {', '.join(sorted(unknown))}")
+        if any(not isinstance(v, int) or v <= 0 for v in raw_limits.values()):
+            raise ValueError(f"Index {name!r}: limits must be positive whole numbers")
+        access[name] = IndexAccess(name, readers, writers, Limits(**raw_limits))
     return access

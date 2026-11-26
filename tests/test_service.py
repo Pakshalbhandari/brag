@@ -12,8 +12,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from brag.manifest import Manifest  # noqa: E402
+from brag.models import TokenUsage  # noqa: E402
 from brag.pipeline import IngestResult, RemoveResult  # noqa: E402
-from brag.service.access import IndexAccess, load_access  # noqa: E402
+from brag.service.access import IndexAccess, Limits, load_access  # noqa: E402
 from brag.service.app import ServiceConfig, create_app  # noqa: E402
 from brag.service.audit import AuditLog  # noqa: E402
 from brag.service.auth import AuthError, OIDCVerifier, claim, groups_from  # noqa: E402
@@ -100,7 +101,12 @@ class FakePipeline:
     def __init__(self, settings):
         self.settings = settings
         self.manifest = Manifest(settings.manifest_file)
+        self.models = SimpleNamespace(usage=TokenUsage())
         self.closed = False
+
+    def spend(self, tokens):
+        self.models.usage.add(SimpleNamespace(input_tokens=tokens, output_tokens=0,
+                                              cache_creation_input_tokens=0, cache_read_input_tokens=0))
 
     async def retrieve(self, question, mode):
         if not self.manifest.files:
@@ -108,6 +114,7 @@ class FakePipeline:
         return {"chunks": [{"file_path": e.label, "content": "text"} for e in self.manifest.files.values()]}
 
     async def query(self, question, mode):
+        self.spend(100)
         return f"answer to {question}"
 
     async def ingest_file(self, path, label=None):
@@ -125,6 +132,27 @@ class FakePipeline:
 
     async def close(self):
         self.closed = True
+
+
+@pytest.fixture
+def make_setup(tmp_path, settings):
+    def make(limits=Limits(), sources=()):
+        audit_path = tmp_path / "audit.jsonl"
+        config = ServiceConfig(
+            access={
+                "finance": IndexAccess("finance", frozenset({"finance"}), frozenset({"finance-admins"}), limits),
+                "handbook": IndexAccess("handbook", frozenset({"*"}), frozenset({"hr"})),
+            },
+            verifier=verifier(),
+            audit=AuditLog(audit_path),
+            data_dir=tmp_path / "data",
+            base_settings=settings,
+            max_upload_bytes=1024,
+            sources=list(sources),
+        )
+        app = create_app(config, pipeline_factory=FakePipeline)
+        return SimpleNamespace(app=app, audit=audit_path, config=config)
+    return make
 
 
 @pytest.fixture
@@ -273,3 +301,106 @@ def test_question_logging_can_be_turned_off(tmp_path):
     log = AuditLog(tmp_path / "a.jsonl", include_questions=False)
     log.write("query", user="u", question="secret?")
     assert "question" not in audit_events(tmp_path / "a.jsonl")[0]
+
+
+def test_limits_in_access_file(tmp_path):
+    path = tmp_path / "access.yaml"
+    path.write_text("indexes:\n  f:\n    readers: [a]\n    limits: {monthly_tokens: 1000, user_queries_per_minute: 2}\n")
+    assert load_access(path)["f"].limits == Limits(monthly_tokens=1000, user_queries_per_minute=2)
+    path.write_text("indexes:\n  f:\n    readers: [a]\n    limits: {tokens: 5}\n")
+    with pytest.raises(ValueError, match="unknown limit"):
+        load_access(path)
+    path.write_text("indexes:\n  f:\n    readers: [a]\n    limits: {monthly_tokens: -1}\n")
+    with pytest.raises(ValueError, match="positive"):
+        load_access(path)
+
+
+def seed_finance(c):
+    admin = auth("bob", ("finance-admins",))
+    wait_for(c, upload(c, "finance", [("q3.docx", b"one")], admin).json()["job_id"], admin)
+
+
+def test_per_minute_query_limit(make_setup):
+    s = make_setup(Limits(user_queries_per_minute=2))
+    with TestClient(s.app) as c:
+        seed_finance(c)
+        alice, carol = auth("alice", ("finance",)), auth("carol", ("finance",))
+        for _ in range(2):
+            assert c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=alice).status_code == 200
+        r = c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=alice)
+        assert r.status_code == 429 and int(r.headers["Retry-After"]) > 0
+        assert c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=carol).status_code == 200
+        assert audit_events(s.audit)[-2]["event"] == "limited"
+
+
+def test_daily_query_limit_and_usage_endpoint(make_setup):
+    s = make_setup(Limits(user_queries_per_day=1))
+    with TestClient(s.app) as c:
+        seed_finance(c)
+        alice = auth("alice", ("finance",))
+        assert c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=alice).status_code == 200
+        assert c.post("/v1/indexes/finance/retrieve", json={"question": "q"}, headers=alice).status_code == 429
+        usage = c.get("/v1/indexes/finance/usage", headers=alice).json()
+        assert usage["your_queries_today"] == 1 and usage["user_queries_per_day_limit"] == 1
+        assert usage["month_tokens"] == 100  # the fake query spent 100 tokens
+
+
+def test_monthly_token_budget_blocks_queries_and_uploads(make_setup):
+    s = make_setup(Limits(monthly_tokens=150))
+    with TestClient(s.app) as c:
+        seed_finance(c)
+        alice, admin = auth("alice", ("finance",)), auth("bob", ("finance-admins",))
+        assert c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=alice).status_code == 200
+        assert c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=alice).status_code == 200
+        r = c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=alice)
+        assert r.status_code == 429 and "token budget" in r.json()["detail"]
+        assert upload(c, "finance", [("q4.docx", b"x")], admin).status_code == 429
+        # Other indexes are unaffected.
+        assert c.post("/v1/indexes/handbook/query", json={"question": "q"}, headers=alice).status_code == 409
+
+
+def test_usage_survives_restart(make_setup):
+    s = make_setup(Limits(user_queries_per_day=5))
+    with TestClient(s.app) as c:
+        seed_finance(c)
+        c.post("/v1/indexes/finance/query", json={"question": "q"}, headers=auth("alice", ("finance",)))
+    s2 = make_setup(Limits(user_queries_per_day=5))
+    with TestClient(s2.app) as c:
+        usage = c.get("/v1/indexes/finance/usage", headers=auth("alice", ("finance",))).json()
+        assert usage["your_queries_today"] == 1 and usage["month_tokens"] == 100
+
+
+def test_sync_endpoint_runs_the_index_sources(make_setup, monkeypatch):
+    import brag.connectors as connectors
+    from brag.connectors import SourceConfig, SyncResult
+
+    synced = []
+
+    async def fake_sync(pipeline, source):
+        synced.append((pipeline.settings.workspace, source.name))
+        return SyncResult(source.name, added=[f"{source.name}/a.docx"])
+
+    monkeypatch.setattr(connectors, "sync", fake_sync)
+    sources = [SourceConfig("sp", "sharepoint", "finance", {"site_url": "x"}),
+               SourceConfig("wiki", "confluence", "handbook", {"base_url": "x", "space": "E"})]
+    s = make_setup(sources=sources)
+    with TestClient(s.app) as c:
+        admin = auth("bob", ("finance-admins",))
+        assert c.post("/v1/indexes/finance/sync", headers=auth("alice", ("finance",))).status_code == 403
+        r = c.post("/v1/indexes/finance/sync", headers=admin)
+        job = wait_for(c, r.json()["job_id"], admin)
+        assert job["status"] == "done" and job["results"][0]["added"] == ["sp/a.docx"]
+        assert synced == [("finance", "sp")]
+        assert audit_events(s.audit)[-1]["event"] == "job_finished"
+
+
+def test_sync_endpoint_without_sources(setup):
+    r = setup.client.post("/v1/indexes/finance/sync", headers=auth("bob", ("finance-admins",)))
+    assert r.status_code == 404
+
+
+def test_sources_must_point_at_known_indexes(make_setup):
+    from brag.connectors import SourceConfig
+
+    with pytest.raises(ValueError, match="not in access.yaml"):
+        make_setup(sources=[SourceConfig("x", "gcs", "nope", {"bucket": "b"})])

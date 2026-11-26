@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 # "brag-rag". The import name and CLI command are both "brag".
 name = "brag-rag"
 dynamic = ["version"]
-description = "RAG over PDF, DOCX, PPTX and XLSX with Docling, Chonkie and RAG-Anything"
+description = "RAG over PDF, HTML and Office documents with Docling, Chonkie and RAG-Anything"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -50,11 +50,13 @@ mongo = ["pymongo>=4,<5"]
 redis = ["redis>=5,<8"]
 # HTTP service (`brag serve`) with OIDC sign-in.
 server = ["fastapi>=0.115,<1", "uvicorn>=0.30", "python-multipart>=0.0.9", "pyjwt[crypto]>=2.9,<3", "httpx>=0.27"]
+# Google Drive and Google Cloud Storage sources.
+google = ["google-auth[requests]>=2.30,<3"]
 # Client for Google Vertex AI (LLM_PROVIDER=vertex).
 vertex = ["anthropic[vertex]>=2.14,<3"]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "reportlab>=4.0", "brag-rag[server]"]
+dev = ["pytest>=8.3", "reportlab>=4.0", "brag-rag[server,google]"]
 
 [project.urls]
 Homepage = "https://github.com/Pakshalbhandari/brag"

@@ -7,9 +7,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# File types Docling handles: PDF and the three Office formats.
+# File types Docling handles: PDF, HTML (e.g. Confluence pages) and the three Office formats.
 SUPPORTED_EXTENSIONS = {
-    ".pdf",
+    ".pdf", ".html", ".htm",
     ".docx", ".dotx", ".docm", ".dotm",
     ".pptx", ".potx", ".ppsx", ".pptm", ".potm", ".ppsm",
     ".xlsx", ".xlsm", ".xltx", ".xltm",

@@ -4,11 +4,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/brag-rag)](https://pypi.org/project/brag-rag/)
 [![License: MIT](https://img.shields.io/pypi/l/brag-rag)](https://github.com/Pakshalbhandari/brag/blob/main/LICENSE)
 
-Retrieval-augmented Q&A over **PDF, DOCX, PPTX and XLSX** files, built from:
+Retrieval-augmented Q&A over **PDF, HTML, DOCX, PPTX and XLSX** files, from local folders, SharePoint, OneDrive, Google Drive, Google Cloud Storage or Confluence, built from:
 
 | Stage | Library | Role |
 |---|---|---|
-| Parse | [Docling](https://docling.ai/) | Converts PDF and Office files into a structured document: headings, paragraphs, lists, tables, images, speaker notes, sheets, pages |
+| Parse | [Docling](https://docling.ai/) | Converts PDF, HTML and Office files into a structured document: headings, paragraphs, lists, tables, images, speaker notes, sheets, pages |
 | Chunk | [Chonkie](https://github.com/feyninc/chonkie) | `RecursiveChunker` for prose, `TableChunker` for large tables (header repeated in every chunk) |
 | Index + query | [RAG-Anything](https://github.com/HKUDS/RAG-Anything) (on LightRAG) | Multimodal knowledge graph + vector index; tables and images are analysed by the LLM / vision model |
 | Models | Claude (`claude-opus-5-5`, on the Claude API, Bedrock, Vertex AI or Foundry) + local `sentence-transformers` embeddings and optional reranker | LLM, vision, embeddings, reranking |
@@ -172,6 +172,28 @@ await pipeline.remove(["docs/old.pptx"])
 await pipeline.close()
 ```
 
+## Document sources
+
+`brag sync` mirrors SharePoint document libraries, OneDrive, Google Drive folders, Google Cloud Storage buckets and Confluence spaces into an index. Each run downloads new and changed documents, re-indexes them (replacing the old version) and removes documents deleted at the source. Nothing is removed if listing a source fails.
+
+```bash
+cp sources.example.yaml sources.yaml     # one entry per source
+brag sync sources.yaml                   # all sources
+brag sync sources.yaml --source eng-wiki # just one
+```
+
+| Type | What | Credentials |
+|---|---|---|
+| `sharepoint` | A document library (`site_url`, optional `drive` and `folder`) | Entra ID app with application permissions `Sites.Read.All` and `Files.Read.All`: `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET` |
+| `onedrive` | A user's OneDrive (`user`, optional `folder`) | as above |
+| `gdrive` | A Drive folder and its subfolders (`folder_id`). Google Docs, Sheets and Slides are exported as DOCX, XLSX and PPTX (10 MB export limit) | Application Default Credentials or a service-account key; share the folder with the service account. `pip install 'brag-rag[google]'` |
+| `gcs` | A bucket, optionally under a `prefix` | as above, with read access to the bucket |
+| `confluence` | A Confluence Cloud space: pages (as HTML) and, unless `attachments: false`, their supported attachments | `CONFLUENCE_EMAIL` and `CONFLUENCE_API_TOKEN` |
+
+Documents are cited as `<source>/<path>`, for example `eng-wiki/Onboarding.html`. Local copies and a per-source state file live in the index folder (`rag_storage/[workspace/]sources/<source>/`). A source with `index: finance` syncs into that index (workspace). The connectors are tested against mocked APIs that follow each provider's documentation, not against live tenants, so run a first sync on a small folder.
+
+With the default file storage, do not run `brag sync` against an index the service is using at the same time: two processes would write the same files. Let the service sync instead (below).
+
 ## HTTP service
 
 `brag serve` runs brag as an HTTP API for a team: people sign in with your identity provider, and each index is visible only to the groups you allow.
@@ -186,7 +208,9 @@ brag serve --access access.yaml --host 0.0.0.0 --port 8000
 
 - **Sign-in (OIDC).** brag checks bearer tokens from any OpenID Connect provider (Entra ID, Okta, Google, Keycloak, ...): signature against the provider's published keys, issuer, audience and expiry. Clients get the token from the provider as usual; brag has no login page. Groups come from the `groups` claim, or another claim set with `OIDC_GROUPS_CLAIM` (dotted paths such as `realm_access.roles` work).
 - **One index per permission group.** Each index in [access.example.yaml](https://github.com/Pakshalbhandari/brag/blob/main/access.example.yaml) is a separate LightRAG workspace with its own documents, graph and manifest. That is deliberate: a knowledge graph merges facts from all of its documents into shared entity summaries, so per-document filtering inside one graph would leak. Readers may query and list; writers may also upload and remove. An index someone cannot read answers 404, so its existence is not revealed.
-- **Audit log.** Every query and search (who, which index, the question, and the documents the answer was built from), upload, removal, finished job, denied request and failed sign-in is appended to `AUDIT_LOG` as JSON lines. `AUDIT_LOG_QUESTIONS=false` leaves question text out.
+- **Sources and sync.** `brag serve --sources sources.yaml` (every source needs an `index:`) lets writers start a sync with `POST /v1/indexes/{index}/sync`; `SYNC_INTERVAL_MINUTES` also syncs every index on a timer.
+- **Budgets and rate limits.** Optional `limits` per index in `access.yaml`: `monthly_tokens` (Claude tokens per calendar month for that index, queries and ingestion together; uncached input, cache writes and output count, cache reads do not), `user_queries_per_minute` and `user_queries_per_day`. Over a limit, requests get `429` with `Retry-After`. Token counts are exact per index; usage is stored in `BRAG_DATA_DIR/usage.json` and survives restarts. `GET /v1/indexes/{index}/usage` shows the month's tokens and the caller's queries today.
+- **Audit log.** Every query and search (who, which index, the question, and the documents the answer was built from), upload, removal, sync, finished job, denied or rate-limited request and failed sign-in is appended to `AUDIT_LOG` as JSON lines. `AUDIT_LOG_QUESTIONS=false` leaves question text out.
 
 | Method and path | Who | What |
 |---|---|---|
@@ -197,7 +221,9 @@ brag serve --access access.yaml --host 0.0.0.0 --port 8000
 | `GET /v1/indexes/{index}/documents` | readers | Indexed documents |
 | `POST /v1/indexes/{index}/documents` | writers | Multipart upload (`files`); returns a job. A file with an existing name replaces the old version |
 | `DELETE /v1/indexes/{index}/documents/{name}` | writers | Remove a document; returns a job |
-| `GET /v1/jobs/{job_id}` | readers of the job's index | Upload or removal progress and per-file results |
+| `POST /v1/indexes/{index}/sync` | writers | Pull the index's sources; returns a job |
+| `GET /v1/indexes/{index}/usage` | readers | Token budget use and the caller's query count |
+| `GET /v1/jobs/{job_id}` | readers of the job's index | Upload, removal or sync progress and per-file results |
 
 Interactive API docs are at `/docs`. Uploads and removals run in the background, one at a time per index. The service runs as a single process: jobs are kept in memory (a restart forgets finished jobs, not indexed documents), and with the default file storage the indexes live in that process. Put it behind a TLS-terminating proxy; it does not serve HTTPS itself. For local development without an identity provider, `brag serve --no-auth` gives every caller full access and only binds to a loopback address.
 
@@ -264,7 +290,8 @@ src/brag/pipeline.py      LightRAG + RAG-Anything wiring: ingest, update, remove
 src/brag/manifest.py      which file is indexed under which document ID
 src/brag/ontology.py      entity-type proposal and ontology.yaml
 src/brag/evaluation.py    golden-set evaluation (recall@k, MRR, facts, groundedness)
-src/brag/service/         HTTP API: OIDC auth, per-index access, audit log, upload jobs
+src/brag/service/         HTTP API: OIDC auth, per-index access, limits, audit log, jobs
+src/brag/connectors/      SharePoint/OneDrive, Google Drive, GCS and Confluence sources, and sync
 eval/samples.yaml         golden questions for samples/
 tests/                    pytest suite; no API key needed (the PDF test downloads Docling's layout model once)
 samples/                  example files in English, German, French, Greek and Polish

@@ -9,7 +9,9 @@ Endpoints (all under /v1 need a bearer token):
     GET    /v1/indexes/{index}/documents              indexed documents
     POST   /v1/indexes/{index}/documents              multipart upload -> 202 + job (writers)
     DELETE /v1/indexes/{index}/documents/{name}       remove -> 202 + job (writers)
-    GET    /v1/jobs/{job_id}                          ingest/remove job status
+    POST   /v1/indexes/{index}/sync                   pull the index's sources -> 202 + job (writers)
+    GET    /v1/indexes/{index}/usage                  token budget and the caller's query count
+    GET    /v1/jobs/{job_id}                          ingest/remove/sync job status
 
 An index the caller cannot read answers 404, so its existence is not
 revealed. Uploads and removals run in the background, one at a time per
@@ -35,6 +37,7 @@ from ..config import SUPPORTED_EXTENSIONS, Settings
 from .access import IndexAccess
 from .audit import AuditLog
 from .auth import AuthError, OIDCVerifier, User
+from .usage import LimitExceeded, UsageStore
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +53,15 @@ class ServiceConfig:
     data_dir: Path
     base_settings: Settings
     max_upload_bytes: int = 100 * 1024 * 1024
+    sources: list[Any] = field(default_factory=list)  # connectors.SourceConfig, each with an index
+    sync_interval_minutes: int = 0  # 0: sync only on request
 
 
 @dataclass
 class Job:
     id: str
     index: str
-    kind: Literal["ingest", "remove"]
+    kind: Literal["ingest", "remove", "sync"]
     files: list[str]
     user: str
     status: Literal["queued", "running", "done", "failed"] = "queued"
@@ -83,6 +88,15 @@ class IndexManager:
         self.workers: dict[str, asyncio.Task] = {}
         self.jobs: dict[str, Job] = {}
         self._create_lock = asyncio.Lock()
+        self.usage = UsageStore(config.data_dir / "usage.json")
+
+    def record_usage(self, index: str) -> None:
+        pipeline = self.pipelines.get(index)
+        if pipeline is not None:
+            self.usage.record_tokens(index, pipeline.models.usage)
+
+    def sources_for(self, index: str) -> list[Any]:
+        return [src for src in self.config.sources if src.index == index]
 
     def upload_dir(self, index: str) -> Path:
         return self.config.data_dir / index
@@ -110,7 +124,21 @@ class IndexManager:
             try:
                 pipeline = await self.pipeline(index)
                 paths = [self.upload_dir(index) / name for name in job.files]
-                if job.kind == "ingest":
+                if job.kind == "sync":
+                    from ..connectors import sync
+
+                    job.results, failed = [], 0
+                    for source in self.sources_for(index):
+                        try:
+                            r = await sync(pipeline, source)
+                            job.results.append(asdict(r))
+                            failed += len(r.failed)
+                        except Exception as e:
+                            job.results.append({"source": source.name, "error": f"{type(e).__name__}: {e}"})
+                            failed += 1
+                    job.status = "failed" if failed else "done"
+                    job.error = f"{failed} problem(s); see results" if failed else None
+                elif job.kind == "ingest":
                     results = [await _ingest_one(pipeline, p) for p in paths]
                     job.results = results
                     failed = [r for r in results if r["status"] == "failed"]
@@ -127,12 +155,22 @@ class IndexManager:
                 logger.exception("Job %s failed", job.id)
                 job.status, job.error = "failed", f"{type(e).__name__}: {e}"
             finally:
+                self.record_usage(index)
                 job.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self.config.audit.write(
                     "job_finished", job_id=job.id, index=index, kind=job.kind, files=job.files,
                     status=job.status, error=job.error, user=job.user,
                 )
                 queue.task_done()
+
+    async def sync_periodically(self, minutes: int) -> None:
+        while True:
+            await asyncio.sleep(minutes * 60)
+            for index in sorted({src.index for src in self.config.sources}):
+                busy = any(j.index == index and j.kind == "sync" and j.status in ("queued", "running")
+                           for j in self.jobs.values())
+                if not busy:
+                    self.submit(Job(uuid.uuid4().hex, index, "sync", [], "scheduler"))
 
     async def close(self) -> None:
         for task in self.workers.values():
@@ -173,9 +211,18 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
     manager = IndexManager(config, pipeline_factory)
     audit = config.audit
 
+    unknown = sorted({src.index for src in config.sources} - set(config.access))
+    if unknown:
+        raise ValueError(f"Sources point at indexes not in access.yaml: {', '.join(map(str, unknown))}")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        ticker = None
+        if config.sync_interval_minutes > 0 and config.sources:
+            ticker = asyncio.create_task(manager.sync_periodically(config.sync_interval_minutes))
         yield
+        if ticker:
+            ticker.cancel()
         await manager.close()
 
     app = FastAPI(title="brag", version=__version__, lifespan=lifespan)
@@ -207,6 +254,25 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
             audit.write("denied", user=user.subject, index=index, need="write")
             raise HTTPException(403, "You may read this index but not change it")
 
+    def too_many(e: LimitExceeded) -> HTTPException:
+        return HTTPException(429, str(e), headers={"Retry-After": str(max(e.retry_after, 1))})
+
+    def admit_query(user: User, index: str) -> None:
+        limits = config.access[index].limits
+        try:
+            manager.usage.check_tokens(index, limits.monthly_tokens)
+            manager.usage.admit_query(index, user.subject, limits.user_queries_per_minute, limits.user_queries_per_day)
+        except LimitExceeded as e:
+            audit.write("limited", user=user.subject, index=index, reason=str(e))
+            raise too_many(e)
+
+    def admit_job(user: User, index: str) -> None:
+        try:
+            manager.usage.check_tokens(index, config.access[index].limits.monthly_tokens)
+        except LimitExceeded as e:
+            audit.write("limited", user=user.subject, index=index, reason=str(e))
+            raise too_many(e)
+
     def index_error(e: RuntimeError) -> HTTPException:
         if "index is empty" in str(e).lower():
             return HTTPException(409, "This index has no documents yet")
@@ -228,6 +294,7 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
     @app.post("/v1/indexes/{index}/query")
     async def query(index: str, body: QueryRequest, user: User = Depends(current_user)) -> dict[str, Any]:
         require(user, index)
+        admit_query(user, index)
         pipeline = await manager.pipeline(index)
         started = time.monotonic()
         try:
@@ -237,6 +304,8 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
             answer = await pipeline.query(body.question, mode=body.mode)
         except RuntimeError as e:
             raise index_error(e)
+        finally:
+            manager.record_usage(index)
         sources = _sources(data.get("chunks", []))
         audit.write(
             "query", user=user.subject, name=user.name, index=index, mode=body.mode,
@@ -247,11 +316,14 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
     @app.post("/v1/indexes/{index}/retrieve")
     async def retrieve(index: str, body: QueryRequest, user: User = Depends(current_user)) -> dict[str, Any]:
         require(user, index)
+        admit_query(user, index)
         pipeline = await manager.pipeline(index)
         try:
             data = await pipeline.retrieve(body.question, mode=body.mode)
         except RuntimeError as e:
             raise index_error(e)
+        finally:
+            manager.record_usage(index)
         chunks = [{"file": c.get("file_path"), "content": c.get("content")} for c in data.get("chunks", [])]
         audit.write(
             "retrieve", user=user.subject, name=user.name, index=index, mode=body.mode,
@@ -272,6 +344,7 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
     @app.post("/v1/indexes/{index}/documents", status_code=status.HTTP_202_ACCEPTED)
     async def upload(index: str, files: list[UploadFile] = File(...), user: User = Depends(current_user)) -> dict:
         require(user, index, write=True)
+        admit_job(user, index)
         names = [_safe_filename(f.filename) for f in files]
         if len(set(names)) != len(names):
             raise HTTPException(400, "Duplicate file names in one upload")
@@ -304,6 +377,29 @@ def create_app(config: ServiceConfig, pipeline_factory: Callable[[Settings], Any
         job = manager.submit(Job(uuid.uuid4().hex, index, "remove", [name], user.subject))
         audit.write("remove", user=user.subject, name=user.name, index=index, files=[name], job_id=job.id)
         return {"job_id": job.id, "status": job.status}
+
+    @app.post("/v1/indexes/{index}/sync", status_code=status.HTTP_202_ACCEPTED)
+    async def sync_index(index: str, user: User = Depends(current_user)) -> dict:
+        require(user, index, write=True)
+        if not manager.sources_for(index):
+            raise HTTPException(404, "This index has no sources configured")
+        admit_job(user, index)
+        job = manager.submit(Job(uuid.uuid4().hex, index, "sync", [], user.subject))
+        audit.write("sync", user=user.subject, name=user.name, index=index, job_id=job.id,
+                    sources=[s.name for s in manager.sources_for(index)])
+        return {"job_id": job.id, "status": job.status}
+
+    @app.get("/v1/indexes/{index}/usage")
+    async def usage(index: str, user: User = Depends(current_user)) -> dict[str, Any]:
+        require(user, index)
+        limits = config.access[index].limits
+        return {
+            "month_tokens": manager.usage.tokens_this_month(index),
+            "monthly_tokens_limit": limits.monthly_tokens,
+            "your_queries_today": manager.usage.queries_today(index, user.subject),
+            "user_queries_per_day_limit": limits.user_queries_per_day,
+            "user_queries_per_minute_limit": limits.user_queries_per_minute,
+        }
 
     @app.get("/v1/jobs/{job_id}")
     async def job_status(job_id: str, user: User = Depends(current_user)) -> dict[str, Any]:
