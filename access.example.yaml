@@ -5,6 +5,10 @@ indexes:
   finance:
     readers: [finance-team, executives]   # may query, search and list documents
     writers: [finance-admins]             # may also upload and remove documents
+    limits:                               # optional; over a limit requests get 429
+      monthly_tokens: 20000000            # Claude tokens per calendar month for this index
+      user_queries_per_minute: 10
+      user_queries_per_day: 300
   handbook:
     readers: ["*"]                        # any signed-in user
     writers: [hr-admins]

@@ -433,6 +433,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+google = [
+    { name = "google-auth", extra = ["requests"] },
+]
 milvus = [
     { name = "pymilvus" },
 ]
@@ -464,7 +467,7 @@ vertex = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "brag-rag", extra = ["server"] },
+    { name = "brag-rag", extra = ["google", "server"] },
     { name = "pytest" },
     { name = "reportlab" },
 ]
@@ -477,6 +480,7 @@ requires-dist = [
     { name = "chonkie", specifier = ">=1.7.0" },
     { name = "docling", specifier = ">=2.139.0" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115,<1" },
+    { name = "google-auth", extras = ["requests"], marker = "extra == 'google'", specifier = ">=2.30,<3" },
     { name = "httpx", marker = "extra == 'server'", specifier = ">=0.27" },
     { name = "lightrag-hku", specifier = ">=1.4.16,<1.5" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5,<7" },
@@ -493,11 +497,11 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=6.1.0" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.30" },
 ]
-provides-extras = ["milvus", "mongo", "neo4j", "postgres", "qdrant", "redis", "server", "vertex"]
+provides-extras = ["google", "milvus", "mongo", "neo4j", "postgres", "qdrant", "redis", "server", "vertex"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "brag-rag", extras = ["server"] },
+    { name = "brag-rag", extras = ["server", "google"] },
     { name = "pytest", specifier = ">=8.3" },
     { name = "reportlab", specifier = ">=4.0" },
 ]

@@ -94,7 +94,7 @@ class DocumentParser:
             images_scale=2.0,
         )
         self.converter = DocumentConverter(
-            allowed_formats=[InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX],
+            allowed_formats=[InputFormat.PDF, InputFormat.HTML, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX],
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)},
         )
         # min_characters_per_chunk=1: Chonkie glues any split shorter than this
@@ -270,7 +270,7 @@ class _ContentListBuilder:
 
 def _location_unit(path: Path) -> str:
     ext = path.suffix.lower()
-    if ext == ".pdf":
+    if ext in (".pdf", ".html", ".htm"):
         return "Page"
     return "Slide" if ext.startswith(".p") else "Sheet" if ext.startswith(".x") else "Page"
 

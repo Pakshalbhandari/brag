@@ -8,6 +8,7 @@
     brag list                           # indexed files
     brag remove samples/old.pptx        # drop files (or folders) from the index
     brag eval eval/samples.yaml         # retrieval metrics against a golden set
+    brag sync sources.yaml              # pull SharePoint/OneDrive/Drive/GCS/Confluence into the index
     brag serve --access access.yaml     # HTTP API with OIDC sign-in (brag-rag[server])
 """
 
@@ -212,7 +213,57 @@ async def cmd_eval(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+async def cmd_sync(args: argparse.Namespace) -> int:
+    from dataclasses import replace
+
+    from .config import Settings
+    from .connectors import load_sources, sync
+    from .pipeline import RAGPipeline
+
+    sources = load_sources(args.sources)
+    if args.source:
+        sources = [s for s in sources if s.name in args.source]
+        missing = set(args.source) - {s.name for s in sources}
+        if missing:
+            print(f"No source named {', '.join(sorted(missing))} in {args.sources}", file=sys.stderr)
+            return 1
+    base = Settings()
+    problems = 0
+    # Sources that name an index sync into that workspace; the rest into the default index.
+    for workspace in sorted({s.index or base.workspace for s in sources}):
+        pipeline = RAGPipeline(replace(base, workspace=workspace))
+        try:
+            for source in [s for s in sources if (s.index or base.workspace) == workspace]:
+                try:
+                    result = await sync(pipeline, source)
+                except Exception as e:
+                    print(f"{source.name}: {type(e).__name__}: {e}", file=sys.stderr)
+                    problems += 1
+                    continue
+                print(result.summary())
+                for label, error in result.failed.items():
+                    print(f"  failed {label}: {error}", file=sys.stderr)
+                problems += len(result.failed)
+        finally:
+            await pipeline.close()
+        if pipeline.models.usage.requests:
+            print(pipeline.models.usage.summary())
+    return 1 if problems else 0
+
+
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def _service_sources(path: str | None) -> list:
+    if not path:
+        return []
+    from .connectors import load_sources
+
+    sources = load_sources(path)
+    without = [s.name for s in sources if not s.index]
+    if without:
+        raise SystemExit(f"Sources need an `index:` to be used by the service: {', '.join(without)}")
+    return sources
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -258,6 +309,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         data_dir=Path(os.getenv("BRAG_DATA_DIR", "./brag_data")).resolve(),
         base_settings=Settings(),
         max_upload_bytes=int(os.getenv("MAX_UPLOAD_MB", "100")) * 1024 * 1024,
+        sources=_service_sources(args.sources),
+        sync_interval_minutes=int(os.getenv("SYNC_INTERVAL_MINUTES", "0")),
     )
     # One worker process: indexes, job queues and LightRAG's in-memory storages
     # live in this process.
@@ -309,6 +362,11 @@ def main() -> None:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--no-auth", action="store_true", help="Development only: no sign-in, loopback addresses only")
+    p.add_argument("--sources", help="sources.yaml; each source needs an `index:`")
+
+    p = sub.add_parser("sync", help="Pull documents from SharePoint, OneDrive, Google Drive, GCS or Confluence")
+    p.add_argument("sources", help="sources.yaml")
+    p.add_argument("--source", action="append", help="Only this source (repeatable)")
 
     args = ap.parse_args()
     # Look for .env from the current directory upwards, not from the installed package's location.
@@ -324,7 +382,8 @@ def main() -> None:
     elif args.command == "ontology":
         code = asyncio.run(cmd_ontology_propose(args))
     else:
-        handlers = {"ingest": cmd_ingest, "remove": cmd_remove, "query": cmd_query, "chat": cmd_chat, "eval": cmd_eval}
+        handlers = {"ingest": cmd_ingest, "remove": cmd_remove, "query": cmd_query, "chat": cmd_chat, "eval": cmd_eval,
+                    "sync": cmd_sync}
         code = asyncio.run(handlers[args.command](args))
     sys.exit(code)
 
