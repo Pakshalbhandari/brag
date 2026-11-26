@@ -26,10 +26,21 @@ class FakeKV:
         pass
 
 
+class FakeDocStatus(FakeKV):
+    async def get_status_counts(self):
+        processed = sum(1 for v in self.data.values() if v.get("status") == "processed")
+        return {"processed": processed}
+
+
 class FakeLightRAG:
     def __init__(self):
-        self.doc_status = FakeKV()
+        self.doc_status = FakeDocStatus()
         self.deleted = []
+        self.data_queries = []
+
+    async def aquery_data(self, query, param):
+        self.data_queries.append(param)
+        return {"status": "success", "data": {"chunks": [{"file_path": "report.docx", "content": "x"}]}}
 
     async def adelete_by_doc_id(self, doc_id):
         self.deleted.append(doc_id)
@@ -70,6 +81,7 @@ def make_pipeline(settings, tmp_path, monkeypatch):
         p.entity_types = ["Product"]
         p.lightrag = FakeLightRAG()
         p.rag = FakeRAG(p.lightrag, fail_for)
+        p.rerank_func = None
         p._initialized = True
         return p
 
@@ -142,17 +154,39 @@ def test_remove_folder_and_deleted_files(make_pipeline, make_docx, make_xlsx, tm
     assert run(p.remove([tmp_path / "nothing.docx"])) == []
 
 
-def test_query_asks_for_locations(make_pipeline, settings):
+def test_query_asks_for_locations_and_skips_rerank_without_model(make_pipeline, make_docx):
     p = make_pipeline()
-    settings.working_dir.mkdir(parents=True)
-    (settings.working_dir / "kv_store_full_docs.json").write_text("{}")
+    run(p.ingest([make_docx()]))
     assert run(p.query("q?")) == "answer"
     assert p.rag.queries[0]["user_prompt"] == CITATION_PROMPT
+    assert p.rag.queries[0]["enable_rerank"] is False
+
+
+def test_query_reranks_when_a_model_is_set(make_pipeline, make_docx):
+    p = make_pipeline()
+    p.rerank_func = object()
+    run(p.ingest([make_docx()]))
+    run(p.query("q?"))
+    assert p.rag.queries[0]["enable_rerank"] is True
 
 
 def test_query_without_index(make_pipeline):
     with pytest.raises(RuntimeError, match="brag ingest"):
         run(make_pipeline().query("q?"))
+
+
+def test_retrieve_returns_ranked_chunks(make_pipeline, make_docx):
+    p = make_pipeline()
+    run(p.ingest([make_docx()]))
+    data = run(p.retrieve("q?", mode="naive"))
+    assert data["chunks"][0]["file_path"] == "report.docx"
+    assert p.lightrag.data_queries[0].mode == "naive"
+
+
+def test_rag_anything_keeps_full_labels(settings):
+    from brag.pipeline import rag_anything_config
+
+    assert rag_anything_config(settings).use_full_path is True
 
 
 def test_collect_files_skips_lock_files_and_missing(tmp_path, make_docx):

@@ -1,7 +1,9 @@
 """Model functions in the shapes LightRAG / RAG-Anything call them with.
 
-* LLM + vision: Claude via the Anthropic SDK
+* LLM + vision: Claude via the Anthropic SDK, on the Claude API, Amazon Bedrock,
+  Google Vertex AI or Microsoft Foundry
 * Embeddings: a local sentence-transformers model (Anthropic has no embeddings API)
+* Reranking (optional): a local sentence-transformers cross-encoder
 """
 
 import asyncio
@@ -9,7 +11,7 @@ import base64
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import anthropic
 import numpy as np
@@ -100,11 +102,42 @@ def _system_blocks(system: str) -> list[dict[str, Any]]:
     return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
 
 
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def make_client(settings: Settings) -> Any:
+    """The async client for the configured platform.
+
+    Server-side refusal fallbacks exist only on the Claude API; on Bedrock,
+    Vertex and Foundry the SDK's client-side middleware retries a declined
+    request on the fallback model instead.
+    """
+    if settings.llm_provider == "anthropic":
+        return anthropic.AsyncAnthropic()
+    middleware = []
+    if settings.llm_fallback_model:
+        middleware.append(anthropic.BetaRefusalFallbackMiddleware([{"model": settings.llm_fallback_model}]))
+    cls = {
+        "bedrock": anthropic.AsyncAnthropicBedrockMantle,  # AWS_REGION + standard AWS credentials
+        "vertex": anthropic.AsyncAnthropicVertex,  # CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID + ADC
+        "foundry": anthropic.AsyncAnthropicFoundry,  # ANTHROPIC_FOUNDRY_RESOURCE + ANTHROPIC_FOUNDRY_API_KEY
+    }[settings.llm_provider]
+    return cls(middleware=middleware)
+
+
 class ClaudeModels:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.client = anthropic.AsyncAnthropic()
+        self.client = make_client(settings)
         self.usage = TokenUsage()
+
+    def _fallback_kwargs(self) -> dict[str, Any]:
+        if self.settings.llm_provider != "anthropic":
+            return {}  # handled by the client middleware
+        fallbacks: Any = (
+            [{"model": self.settings.llm_fallback_model}] if self.settings.llm_fallback_model else "default"
+        )
+        return {"betas": [FALLBACK_BETA], "fallbacks": fallbacks}
 
     async def _create(
         self, messages: list[dict[str, Any]], system: str | None, output_format: dict[str, Any] | None = None
@@ -119,10 +152,9 @@ class ClaudeModels:
             model=self.settings.llm_model,
             max_tokens=self.settings.llm_max_tokens,
             output_config=output_config,
-            # Re-run on a fallback model if a safety classifier declines the request.
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
             messages=messages,
+            # Re-run on a fallback model if a safety classifier declines the request.
+            **self._fallback_kwargs(),
             **kwargs,
         )
         self.usage.add(response.usage)
@@ -190,3 +222,26 @@ def build_embedding_func(settings: Settings) -> EmbeddingFunc:
         func=embed,
         model_name=settings.embedding_model,
     )
+
+
+@lru_cache(maxsize=2)
+def _load_cross_encoder(name: str):
+    from sentence_transformers import CrossEncoder
+
+    return CrossEncoder(name)
+
+
+def build_rerank_func(settings: Settings) -> Callable[..., Awaitable[list[dict[str, Any]]]] | None:
+    """LightRAG rerank function backed by a local cross-encoder, or None when not configured."""
+    if not settings.rerank_model:
+        return None
+    model = _load_cross_encoder(settings.rerank_model)
+
+    async def rerank(query: str, documents: list[str], top_n: int | None = None, **_: Any) -> list[dict[str, Any]]:
+        if not documents:
+            return []
+        scores = await asyncio.to_thread(model.predict, [(query, d) for d in documents])
+        ranked = sorted(range(len(documents)), key=lambda i: float(scores[i]), reverse=True)
+        return [{"index": i, "relevance_score": float(scores[i])} for i in ranked[:top_n]]
+
+    return rerank

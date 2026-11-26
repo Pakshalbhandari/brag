@@ -7,8 +7,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# File types Docling handles for the three Office formats this pipeline targets.
+# File types Docling handles: PDF and the three Office formats.
 SUPPORTED_EXTENSIONS = {
+    ".pdf",
     ".docx", ".dotx", ".docm", ".dotm",
     ".pptx", ".potx", ".ppsx", ".pptm", ".potm", ".ppsm",
     ".xlsx", ".xlsm", ".xltx", ".xltm",
@@ -17,6 +18,29 @@ SUPPORTED_EXTENSIONS = {
 
 def _env(name: str, default: str) -> str:
     return os.getenv(name, default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return _env(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+PROVIDERS = ("anthropic", "bedrock", "vertex", "foundry")
+
+# Model IDs differ by platform: Bedrock prefixes "anthropic.", Vertex uses the
+# bare ID, and Foundry takes the name of your deployment (set LLM_MODEL).
+_DEFAULT_MODELS = {
+    "anthropic": ("claude-opus-5-5", "claude-opus-4-8"),
+    "bedrock": ("anthropic.claude-opus-5-5", "anthropic.claude-opus-4-8"),
+    "vertex": ("claude-opus-5-5", "claude-opus-4-8"),
+    "foundry": ("claude-opus-5-5", "claude-opus-4-8"),
+}
+
+
+def _provider() -> str:
+    provider = _env("LLM_PROVIDER", "anthropic").strip().lower()
+    if provider not in PROVIDERS:
+        raise ValueError(f"LLM_PROVIDER must be one of {', '.join(PROVIDERS)}, not {provider!r}")
+    return provider
 
 
 @dataclass
@@ -29,8 +53,16 @@ class Settings:
     # Used when the file exists; otherwise ENTITY_TYPES or LightRAG's defaults.
     ontology_file: Path = field(default_factory=lambda: Path(_env("ONTOLOGY_FILE", "./ontology.yaml")))
 
-    # Claude (LLM + vision)
-    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", "claude-opus-5-5"))
+    # Claude (LLM + vision). LLM_PROVIDER picks the platform: the Claude API, or
+    # Amazon Bedrock, Google Vertex AI or Microsoft Foundry for data-residency
+    # rules. Each platform client reads its usual credentials from the environment.
+    llm_provider: str = field(default_factory=_provider)
+    llm_model: str = field(default_factory=lambda: _env("LLM_MODEL", _DEFAULT_MODELS[_provider()][0]))
+    # Retried on this model when a safety classifier declines a request. On the
+    # Claude API the server picks the fallback ("default") unless this is set.
+    llm_fallback_model: str = field(default_factory=lambda: _env(
+        "LLM_FALLBACK_MODEL", "" if _provider() == "anthropic" else _DEFAULT_MODELS[_provider()][1]
+    ))
     llm_effort: str = field(default_factory=lambda: _env("LLM_EFFORT", "medium"))
     llm_max_tokens: int = field(default_factory=lambda: int(_env("LLM_MAX_TOKENS", "16000")))
     llm_max_async: int = field(default_factory=lambda: int(_env("LLM_MAX_ASYNC", "4")))
@@ -38,6 +70,24 @@ class Settings:
     # Local embeddings (sentence-transformers). bge-m3 is multilingual (100+
     # languages, all EU ones) and accepts 8192 tokens, so 1k-token chunks fit.
     embedding_model: str = field(default_factory=lambda: _env("EMBEDDING_MODEL", "BAAI/bge-m3"))
+
+    # Optional local cross-encoder that re-scores retrieved chunks before they
+    # reach the LLM, e.g. BAAI/bge-reranker-v2-m3 (multilingual). Off when empty.
+    rerank_model: str = field(default_factory=lambda: _env("RERANK_MODEL", ""))
+
+    # LightRAG storage backends (class names, e.g. PGKVStorage, PGVectorStorage,
+    # Neo4JStorage, QdrantVectorDBStorage). Each reads its connection settings
+    # from LightRAG's own environment variables (POSTGRES_HOST, NEO4J_URI, ...).
+    kv_storage: str = field(default_factory=lambda: _env("KV_STORAGE", "JsonKVStorage"))
+    vector_storage: str = field(default_factory=lambda: _env("VECTOR_STORAGE", "NanoVectorDBStorage"))
+    graph_storage: str = field(default_factory=lambda: _env("GRAPH_STORAGE", "NetworkXStorage"))
+    doc_status_storage: str = field(default_factory=lambda: _env("DOC_STATUS_STORAGE", "JsonDocStatusStorage"))
+    # Separates several indexes in one set of backends (LightRAG's WORKSPACE).
+    workspace: str = field(default_factory=lambda: _env("WORKSPACE", ""))
+
+    # PDF: run OCR on scanned pages. Needs an OCR engine Docling supports
+    # (e.g. `pip install rapidocr-onnxruntime`); text-based PDFs do not need it.
+    pdf_ocr: bool = field(default_factory=lambda: _env_bool("PDF_OCR", False))
 
     # Language the knowledge graph (entity names, descriptions) is written in.
     # One canonical language lets "Europäische Union" in a German file and

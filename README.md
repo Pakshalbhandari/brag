@@ -4,14 +4,14 @@
 [![Python](https://img.shields.io/pypi/pyversions/brag-rag)](https://pypi.org/project/brag-rag/)
 [![License: MIT](https://img.shields.io/pypi/l/brag-rag)](https://github.com/Pakshalbhandari/brag/blob/main/LICENSE)
 
-Retrieval-augmented Q&A over **DOCX, PPTX and XLSX** files, built from:
+Retrieval-augmented Q&A over **PDF, DOCX, PPTX and XLSX** files, built from:
 
 | Stage | Library | Role |
 |---|---|---|
-| Parse | [Docling](https://docling.ai/) | Converts Office files into a structured document: headings, paragraphs, lists, tables, images, speaker notes, sheets |
+| Parse | [Docling](https://docling.ai/) | Converts PDF and Office files into a structured document: headings, paragraphs, lists, tables, images, speaker notes, sheets, pages |
 | Chunk | [Chonkie](https://github.com/feyninc/chonkie) | `RecursiveChunker` for prose, `TableChunker` for large tables (header repeated in every chunk) |
 | Index + query | [RAG-Anything](https://github.com/HKUDS/RAG-Anything) (on LightRAG) | Multimodal knowledge graph + vector index; tables and images are analysed by the LLM / vision model |
-| Models | Claude (`claude-opus-5-5`) + local `sentence-transformers` embeddings | LLM, vision and embeddings |
+| Models | Claude (`claude-opus-5-5`, on the Claude API, Bedrock, Vertex AI or Foundry) + local `sentence-transformers` embeddings and optional reranker | LLM, vision, embeddings, reranking |
 
 ## Architecture
 
@@ -20,7 +20,7 @@ A rendered copy is at [docs/architecture.png](https://github.com/Pakshalbhandari
 ```mermaid
 flowchart TB
     subgraph SRC["Sources"]
-        F["DOCX / PPTX / XLSX<br/>any European language"]
+        F["PDF / DOCX / PPTX / XLSX<br/>any European language"]
     end
 
     subgraph PARSE["1 · Parse — Docling"]
@@ -172,6 +172,29 @@ await pipeline.remove(["docs/old.pptx"])
 await pipeline.close()
 ```
 
+## Evaluation
+
+`brag eval` scores the index against a golden set of questions, so changes such as a reranker, another chunk size or a different backend can be compared with numbers instead of impressions.
+
+```bash
+brag ingest samples/
+brag eval eval/samples.yaml                       # retrieval only
+brag eval eval/samples.yaml --answers --output report.json
+brag eval eval/samples.yaml --min-recall 0.9      # exit 1 below the threshold (for CI)
+```
+
+| Metric | What it measures | Cost |
+|---|---|---|
+| recall@k | Share of a question's expected sources found in the top k chunks | None in `naive` mode; one keyword call per question in graph modes |
+| hit@k | Whether any expected source is in the top k | as above |
+| MRR | 1 / rank of the first chunk from an expected source | as above |
+| facts | Share of expected facts that appear in the answer (`--answers`) | One answer per question |
+| groundedness | Share of the answer's claims the retrieved context supports, judged by Claude (`--answers`) | One judge call per question |
+
+A golden file lists questions, the files (optionally a slide, sheet or page) each should be answered from, and facts the answer must contain; see [eval/samples.yaml](https://github.com/Pakshalbhandari/brag/blob/main/eval/samples.yaml) and the docstring of `brag.evaluation`. Write one for your own documents: a few dozen real questions tell you far more than the samples. The report records the configuration (mode, k, models, backends) next to the scores, so runs can be compared.
+
+The [Evaluation workflow](https://github.com/Pakshalbhandari/brag/blob/main/.github/workflows/eval.yml) runs the sample set in GitHub Actions on demand; it needs an `ANTHROPIC_API_KEY` repository secret.
+
 ## Multilingual documents
 
 Documents in any European language (Latin, Greek and Cyrillic scripts, plus Armenian and Georgian) can be mixed in one index. No language detection or per-language setup is needed.
@@ -186,7 +209,11 @@ Documents in any European language (Latin, Greek and Cyrillic scripts, plus Arme
 
 All settings are environment variables; see `.env.example`. The main ones:
 
+- `LLM_PROVIDER`: where Claude runs: `anthropic` (the Claude API, default), `bedrock`, `vertex` or `foundry`, for data-residency rules. Each uses its platform's usual credentials (`.env.example` lists them). On Vertex, install `brag-rag[vertex]`. Model IDs differ by platform: Bedrock defaults to `anthropic.claude-opus-5-5`; on Foundry set `LLM_MODEL` to your deployment name.
 - `LLM_MODEL`, `LLM_EFFORT`: the Claude model and effort used for ingestion (entity extraction, table and image analysis) and for answers. Ingestion makes several LLM calls per chunk, so for large corpora a lower effort or a cheaper model is the main cost lever.
+- `RERANK_MODEL`: a local cross-encoder that re-scores retrieved chunks before they reach Claude. `BAAI/bge-reranker-v2-m3` is multilingual (about 2.3 GB). Off by default; measure it with `brag eval` before keeping it.
+- `KV_STORAGE`, `VECTOR_STORAGE`, `GRAPH_STORAGE`, `DOC_STATUS_STORAGE`: LightRAG storage backends, for example `PGKVStorage`, `PGVectorStorage`, `Neo4JStorage` or `QdrantVectorDBStorage`, configured with LightRAG's own variables (`POSTGRES_HOST`, `NEO4J_URI`, ...). Install the driver with an extra: `brag-rag[postgres]`, `[neo4j]`, `[qdrant]`, `[milvus]`, `[mongo]` or `[redis]`. `WORKSPACE` keeps several indexes apart in one set of backends. brag's file manifest (`rag_storage/brag_manifest.json`) and extracted images stay on local disk, so run ingestion from one machine.
+- `PDF_OCR`: OCR for scanned PDFs (off by default; needs an OCR engine that Docling supports, such as `rapidocr-onnxruntime`). Text-based PDFs work without it. Borderless tables in PDFs may be read as plain text.
 - `CHUNK_SIZE`: Chonkie chunk size in `o200k_base` tokens. LightRAG's limit is set 256 tokens higher to leave room for the breadcrumb.
 - `TABLE_MODAL_MAX_ROWS`: the cutoff between analysing a table as one unit and row-chunking it.
 - `KG_LANGUAGE`: the language the knowledge graph is written in. Changing it after ingestion mixes languages in the graph, so re-index if you change it.
@@ -194,7 +221,7 @@ All settings are environment variables; see `.env.example`. The main ones:
 
 Entity extraction sends the same long instructions with every chunk, so the system prompt is sent with prompt caching: after the first chunk it is read from cache at a fraction of the input price. `brag ingest` reports how much input was served from cache.
 
-Requests use Claude's server-side refusal fallback (`fallbacks="default"`). If a safety classifier declines a request, it is retried on a fallback model.
+If a safety classifier declines a request, it is retried on a fallback model: on the Claude API through the server-side `fallbacks` parameter (the server picks the model unless `LLM_FALLBACK_MODEL` is set), on Bedrock, Vertex and Foundry through the SDK's client-side fallback middleware (default fallback `claude-opus-4-8`).
 
 ## Layout
 
@@ -207,7 +234,9 @@ src/brag/models.py        Claude LLM/vision (prompt caching, token usage) + loca
 src/brag/pipeline.py      LightRAG + RAG-Anything wiring: ingest, update, remove, query
 src/brag/manifest.py      which file is indexed under which document ID
 src/brag/ontology.py      entity-type proposal and ontology.yaml
-tests/                    pytest suite; no API key or model download needed
+src/brag/evaluation.py    golden-set evaluation (recall@k, MRR, facts, groundedness)
+eval/samples.yaml         golden questions for samples/
+tests/                    pytest suite; no API key needed (the PDF test downloads Docling's layout model once)
 samples/                  example files in English, German, French, Greek and Polish
 ```
 
