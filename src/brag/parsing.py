@@ -1,6 +1,6 @@
 """Docling parsing + Chonkie chunking -> RAG-Anything content list.
 
-Docling turns DOCX/PPTX/XLSX into a DoclingDocument. We walk it in reading
+Docling turns PDF/DOCX/PPTX/XLSX into a DoclingDocument. We walk it in reading
 order and emit RAG-Anything (MinerU-format) content items:
 
 * prose (paragraphs, list items, speaker notes) is buffered per section and
@@ -29,7 +29,8 @@ from typing import Any
 
 from chonkie import RecursiveChunker, TableChunker
 from docling.datamodel.base_models import InputFormat
-from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc import (
     ContentLayer,
     DoclingDocument,
@@ -85,8 +86,16 @@ class ParsedDocument:
 class DocumentParser:
     def __init__(self, settings: Settings):
         self.settings = settings
+        pdf_options = PdfPipelineOptions(
+            do_ocr=settings.pdf_ocr,
+            # Keep picture crops, so figures in PDFs reach the vision model like
+            # embedded images in Office files do.
+            generate_picture_images=True,
+            images_scale=2.0,
+        )
         self.converter = DocumentConverter(
-            allowed_formats=[InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX]
+            allowed_formats=[InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX],
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)},
         )
         # min_characters_per_chunk=1: Chonkie glues any split shorter than this
         # onto the previous one, so the default (24) disables word-level
@@ -172,13 +181,16 @@ class _ContentListBuilder:
 
     # -- emitters ----------------------------------------------------------
 
+    def _location(self, page: int) -> str:
+        """"[Slide 3]", "[Sheet 2]" or "[Page 5]"; empty for DOCX, which has no pages."""
+        return f"[{self.unit} {page + 1}]" if self.doc.pages else ""
+
     def _breadcrumb(self, page: int, extra: str | None = None) -> str:
         parts = [h[1] for h in self.headings]
         if extra:
             parts.append(extra)
         crumb = " > ".join(parts)[:MAX_BREADCRUMB_CHARS]
-        location = f"[{self.unit} {page + 1}]" if self.doc.pages else ""
-        return " ".join(x for x in (location, crumb) if x)
+        return " ".join(x for x in (self._location(page), crumb) if x)
 
     def _add_text_chunk(self, text: str, page: int, context: str) -> None:
         body = f"{context}\n\n{text}" if context else text
@@ -201,7 +213,9 @@ class _ContentListBuilder:
             return
         caption = normalize_text(item.caption_text(self.doc)).strip()
         sheet = _sheet_name(item, self.doc)
-        captions = [c for c in (f"Sheet: {sheet}" if sheet else "", caption) if c]
+        # The location goes into the caption so the chunk RAG-Anything writes for
+        # the table can be cited by slide, sheet or page like text chunks can.
+        captions = [c for c in (self._location(page), f"Sheet: {sheet}" if sheet else "", caption) if c]
         rows = item.data.num_rows
 
         if rows <= self.p.settings.table_modal_max_rows:
@@ -213,7 +227,7 @@ class _ContentListBuilder:
             return
 
         # Large table: full coverage as row-window text chunks...
-        label = " | ".join(captions) or "Table"
+        label = " | ".join(c for c in captions if c != self._location(page)) or "Table"  # breadcrumb has the location
         pieces = self.p.table_chunker.chunk(markdown)
         for i, piece in enumerate(pieces, 1):
             context = self._breadcrumb(page, f"{label} (part {i}/{len(pieces)}, {rows - 1} data rows total)")
@@ -240,7 +254,7 @@ class _ContentListBuilder:
         caption = normalize_text(item.caption_text(self.doc)).strip()
         self.items.append({
             "type": "image", "img_path": str(img_path),
-            "image_caption": [caption] if caption else [],
+            "image_caption": [c for c in (self._location(page), caption) if c],
             "image_footnote": [], "page_idx": page,
             # RAG-Anything only derives this from MinerU heading items, which we don't emit.
             "_section_path": " > ".join(h[1] for h in self.headings),
@@ -256,6 +270,8 @@ class _ContentListBuilder:
 
 def _location_unit(path: Path) -> str:
     ext = path.suffix.lower()
+    if ext == ".pdf":
+        return "Page"
     return "Slide" if ext.startswith(".p") else "Sheet" if ext.startswith(".x") else "Page"
 
 

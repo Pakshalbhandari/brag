@@ -72,3 +72,54 @@ def test_openai_messages_are_converted():
     ])
     assert system == "be brief"
     assert messages[0]["content"][1]["source"] == {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}
+
+
+def test_explicit_fallback_model_on_claude_api(settings, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    settings.llm_fallback_model = "claude-opus-4-8"
+    assert ClaudeModels(settings)._fallback_kwargs() == {
+        "betas": ["server-side-fallback-2026-07-01"],
+        "fallbacks": [{"model": "claude-opus-4-8"}],
+    }
+
+
+@pytest.mark.parametrize("provider,cls_name", [
+    ("bedrock", "AsyncAnthropicBedrockMantle"),
+    ("vertex", "AsyncAnthropicVertex"),
+    ("foundry", "AsyncAnthropicFoundry"),
+])
+def test_cloud_providers_use_client_side_fallback(settings, monkeypatch, provider, cls_name):
+    import anthropic
+
+    from brag import models as models_module
+
+    created = {}
+
+    class FakeClient:
+        def __init__(self, middleware):
+            created["middleware"] = middleware
+
+    monkeypatch.setattr(anthropic, cls_name, FakeClient)
+    settings.llm_provider, settings.llm_fallback_model = provider, "claude-opus-4-8"
+    m = models_module.ClaudeModels(settings)
+
+    assert isinstance(m.client, FakeClient)
+    assert [type(x).__name__ for x in created["middleware"]] == ["BetaRefusalFallbackMiddleware"]
+    assert m._fallback_kwargs() == {}  # no server-side fallbacks off the Claude API
+
+
+def test_rerank_func(settings, monkeypatch):
+    from brag import models as models_module
+
+    assert models_module.build_rerank_func(settings) is None
+
+    class FakeCrossEncoder:
+        def predict(self, pairs):
+            return [len(doc) for _, doc in pairs]
+
+    monkeypatch.setattr(models_module, "_load_cross_encoder", lambda name: FakeCrossEncoder())
+    settings.rerank_model = "some/cross-encoder"
+    rerank = models_module.build_rerank_func(settings)
+    ranked = asyncio.run(rerank(query="q", documents=["aa", "a", "aaa"], top_n=2))
+    assert ranked == [{"index": 2, "relevance_score": 3.0}, {"index": 0, "relevance_score": 2.0}]
+    assert asyncio.run(rerank(query="q", documents=[])) == []

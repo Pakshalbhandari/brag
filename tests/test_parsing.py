@@ -74,3 +74,35 @@ def test_source_label_is_relative_inside_cwd(tmp_path, monkeypatch):
     assert source_label("q3/report.docx") == "q3/report.docx"
     outside = Path(os.path.abspath(os.sep)) / "elsewhere" / "report.docx"
     assert source_label(outside) == outside.as_posix()
+
+
+def test_small_table_caption_carries_the_location(parser, make_xlsx):
+    parsed = parser.parse(make_xlsx(rows=3))
+    table = next(i for i in parsed.content_list if i["type"] == "table")
+    assert table["table_caption"][:2] == ["[Sheet 1]", "Sheet: Sales"]
+
+
+def test_large_table_label_has_location_once(parser, make_xlsx, settings):
+    parsed = parser.parse(make_xlsx(rows=settings.table_modal_max_rows + 30))
+    row_chunk = next(i for i in parsed.content_list if i["type"] == "text")
+    assert row_chunk["text"].count("[Sheet 1]") == 1
+
+
+def test_pdf_pages_become_locations(parser, tmp_path):
+    """Runs Docling's PDF layout model (downloaded on first use)."""
+    pytest.importorskip("reportlab")
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate
+
+    path = tmp_path / "annual.pdf"
+    styles = getSampleStyleSheet()
+    SimpleDocTemplate(str(path)).build([
+        Paragraph("Summary", styles["Heading2"]),
+        Paragraph("Acme grew revenue 18% in 2026.", styles["BodyText"]),
+        PageBreak(),
+        Paragraph("Outlook", styles["Heading2"]),
+        Paragraph("Management expects further growth.", styles["BodyText"]),
+    ])
+    texts = [i["text"] for i in parser.parse(path).content_list if i["type"] == "text"]
+    assert any(t.startswith("[Page 1] Summary") and "18%" in t for t in texts)
+    assert any(t.startswith("[Page 2] Outlook") for t in texts)

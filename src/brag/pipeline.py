@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
 
-from lightrag import LightRAG
+from lightrag import LightRAG, QueryParam
 from lightrag.base import DocStatus
 from lightrag.constants import DEFAULT_ENTITY_TYPES
 from lightrag.kg.shared_storage import initialize_pipeline_status
@@ -15,7 +15,7 @@ from raganything import RAGAnything, RAGAnythingConfig
 
 from .config import SUPPORTED_EXTENSIONS, Settings
 from .manifest import Manifest
-from .models import ClaudeModels, build_embedding_func
+from .models import ClaudeModels, build_embedding_func, build_rerank_func
 from .ontology import load_entity_types
 from .parsing import CHUNK_SEPARATOR, DocumentParser, file_doc_id, source_label
 
@@ -46,6 +46,21 @@ def collect_files(paths: Iterable[str | Path]) -> list[Path]:
             logger.warning("Skipping unsupported file: %s", p)
     # Office lock files ("~$report.docx") are not real documents.
     return [f for f in files if not f.name.startswith("~$")]
+
+
+def rag_anything_config(settings: Settings) -> RAGAnythingConfig:
+    return RAGAnythingConfig(
+        working_dir=str(settings.working_dir),
+        parser_output_dir=str(settings.output_dir),
+        parser="docling",
+        enable_image_processing=True,
+        enable_table_processing=True,
+        enable_equation_processing=True,
+        # Keep the label brag passes (a path relative to the working directory).
+        # By default RAG-Anything cuts it to the file name, so q3/report.docx and
+        # q4/report.docx would be cited the same way.
+        use_full_path=True,
+    )
 
 
 @dataclass
@@ -85,6 +100,7 @@ class RAGPipeline:
             return await models.vision(*args, **kwargs)
 
         embedding_func = build_embedding_func(self.settings)
+        self.rerank_func = build_rerank_func(self.settings)
 
         # Built here rather than left to RAG-Anything, so initialising, deleting
         # and querying go through LightRAG's public API.
@@ -97,17 +113,16 @@ class RAGPipeline:
             llm_model_name=self.settings.llm_model,
             llm_model_max_async=self.settings.llm_max_async,
             addon_params={"language": self.settings.kg_language, "entity_types": self.entity_types},
+            rerank_model_func=self.rerank_func,
+            kv_storage=self.settings.kv_storage,
+            vector_storage=self.settings.vector_storage,
+            graph_storage=self.settings.graph_storage,
+            doc_status_storage=self.settings.doc_status_storage,
+            workspace=self.settings.workspace,
         )
         self.rag = RAGAnything(
             lightrag=self.lightrag,
-            config=RAGAnythingConfig(
-                working_dir=str(self.settings.working_dir),
-                parser_output_dir=str(self.settings.output_dir),
-                parser="docling",
-                enable_image_processing=True,
-                enable_table_processing=True,
-                enable_equation_processing=True,
-            ),
+            config=rag_anything_config(self.settings),
             llm_model_func=llm_func,
             vision_model_func=vision_func,
             embedding_func=embedding_func,
@@ -240,13 +255,34 @@ class RAGPipeline:
 
     # -- query -------------------------------------------------------------
 
-    async def query(self, question: str, mode: str = "mix", **kwargs) -> str:
-        working_dir = Path(self.settings.working_dir)
-        if not working_dir.is_dir() or not any(working_dir.glob("kv_store_*.json")):
-            raise RuntimeError(f"No index found in {working_dir}/. Run `brag ingest <paths>` first.")
+    async def _require_index(self) -> None:
+        # Asks the doc-status store rather than looking for local files, so it
+        # works with database backends too.
         await self.initialize()
+        counts = await self.lightrag.doc_status.get_status_counts()
+        if not counts.get(DocStatus.PROCESSED.value):
+            raise RuntimeError("The index is empty. Run `brag ingest <paths>` first.")
+
+    def _query_defaults(self, kwargs: dict) -> dict:
+        # LightRAG reranks by default and warns when no reranker is configured.
+        kwargs.setdefault("enable_rerank", self.rerank_func is not None)
+        return kwargs
+
+    async def query(self, question: str, mode: str = "mix", **kwargs) -> str:
+        await self._require_index()
         kwargs.setdefault("user_prompt", CITATION_PROMPT)
-        return await self.rag.aquery(question, mode=mode, **kwargs)
+        return await self.rag.aquery(question, mode=mode, **self._query_defaults(kwargs))
+
+    async def retrieve(self, question: str, mode: str = "mix", **kwargs) -> dict:
+        """What a query would put in front of the LLM (entities, relations, ranked
+        chunks with their files), without generating an answer. In graph modes
+        this still makes one small LLM call to extract keywords."""
+        await self._require_index()
+        param = QueryParam(mode=mode, **self._query_defaults(kwargs))
+        result = await self.lightrag.aquery_data(question, param=param)
+        if result.get("status") != "success":
+            raise RuntimeError(f"Retrieval failed: {result.get('message')}")
+        return result["data"]
 
     async def close(self) -> None:
         if self._initialized:

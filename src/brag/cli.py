@@ -7,6 +7,7 @@
     brag chat                           # interactive Q&A
     brag list                           # indexed files
     brag remove samples/old.pptx        # drop files (or folders) from the index
+    brag eval eval/samples.yaml         # retrieval metrics against a golden set
 """
 
 import argparse
@@ -163,6 +164,53 @@ async def cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt(value: float | None) -> str:
+    return "  -  " if value is None else f"{value:.3f}"
+
+
+async def cmd_eval(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .evaluation import load_golden, run_eval
+    from .pipeline import RAGPipeline
+
+    cases = load_golden(args.golden)
+    pipeline = RAGPipeline()
+    try:
+        report = await run_eval(pipeline, cases, mode=args.mode, k=args.k, answers=args.answers)
+    finally:
+        await pipeline.close()
+
+    print(f"{'case':<24} {'recall':>7} {'mrr':>7} {'facts':>7} {'ground':>7}")
+    for r in report.results:
+        if r.error:
+            print(f"{r.id:<24} error: {r.error}")
+            continue
+        print(f"{r.id:<24} {_fmt(r.recall):>7} {_fmt(r.reciprocal_rank):>7} {_fmt(r.fact_recall):>7} {_fmt(r.groundedness):>7}")
+        if r.missing_facts:
+            print(f"{'':<24} missing facts: {', '.join(r.missing_facts)}")
+        for claim in r.unsupported_claims:
+            print(f"{'':<24} unsupported: {claim}")
+    summary = report.summary
+    print(
+        f"\nmode={args.mode} k={args.k}  recall@k={_fmt(summary['recall@k'])}  hit@k={_fmt(summary['hit@k'])}"
+        f"  mrr={_fmt(summary['mrr'])}  facts={_fmt(summary['facts'])}  groundedness={_fmt(summary['groundedness'])}"
+    )
+    if pipeline.models.usage.requests:
+        print(pipeline.models.usage.summary())
+    if args.output:
+        Path(args.output).write_text(report.to_json(), encoding="utf-8")
+        print(f"Report written to {args.output}")
+
+    failures = report.failures({
+        "recall@k": args.min_recall, "mrr": args.min_mrr,
+        "facts": args.min_facts, "groundedness": args.min_groundedness,
+    })
+    for f in failures:
+        print(f"FAIL {f}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="brag", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -193,6 +241,15 @@ def main() -> None:
     p = sub.add_parser("chat", help="Interactive Q&A")
     p.add_argument("--mode", choices=MODES, default="mix")
 
+    p = sub.add_parser("eval", help="Score retrieval (and optionally answers) against a golden question set")
+    p.add_argument("golden", help="YAML file with cases (see brag.evaluation)")
+    p.add_argument("--mode", choices=MODES, default="mix")
+    p.add_argument("-k", "--k", type=int, default=5, help="Chunks considered for recall@k and MRR (default 5)")
+    p.add_argument("--answers", action="store_true", help="Also generate answers and score facts and groundedness")
+    p.add_argument("--output", help="Write the full report as JSON")
+    for metric in ("recall", "mrr", "facts", "groundedness"):
+        p.add_argument(f"--min-{metric}", type=float, help=f"Exit 1 if mean {metric} is below this")
+
     args = ap.parse_args()
     # Look for .env from the current directory upwards, not from the installed package's location.
     load_dotenv(find_dotenv(usecwd=True))
@@ -205,7 +262,7 @@ def main() -> None:
     elif args.command == "ontology":
         code = asyncio.run(cmd_ontology_propose(args))
     else:
-        handlers = {"ingest": cmd_ingest, "remove": cmd_remove, "query": cmd_query, "chat": cmd_chat}
+        handlers = {"ingest": cmd_ingest, "remove": cmd_remove, "query": cmd_query, "chat": cmd_chat, "eval": cmd_eval}
         code = asyncio.run(handlers[args.command](args))
     sys.exit(code)
 

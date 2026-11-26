@@ -1,0 +1,44 @@
+# Golden questions for the files in samples/. Run from the repository root:
+#   brag ingest samples/
+#   brag eval eval/samples.yaml                 # retrieval only
+#   brag eval eval/samples.yaml --answers       # plus facts and groundedness (more API calls)
+cases:
+  - id: q3-growth
+    question: How much did Acme's revenue grow in Q3 2026?
+    sources: [samples/report.docx, samples/bericht_de.docx]
+    facts: ["18%"]
+
+  - id: fastest-region
+    question: Which region had the highest revenue growth in Q3?
+    sources: [samples/report.docx]
+    facts: ["APAC", "25%"]
+
+  - id: q4-outlook
+    question: What revenue does management expect for Q4?
+    sources: [samples/report.docx, samples/bericht_de.docx]
+    facts: ["75", "80"]
+
+  - id: growth-driver
+    question: What drove Acme's growth in the third quarter?
+    sources: [samples/report.docx, samples/bericht_de.docx]
+    facts: ["Widget Pro"]
+
+  - id: working-hours-de
+    question: Auf wie viele Stunden pro Woche wurde die Arbeitszeit reduziert?
+    sources: [samples/bericht_de.docx]
+    facts: ["38"]
+
+  - id: cfo-quote
+    question: How did the CFO describe the outlook?
+    sources: [samples/bericht_de.docx]
+    facts: [["cautiously optimistic", "vorsichtig optimistisch"]]
+
+  - id: sales-headcount
+    question: How many FTEs does the Sales team have?
+    sources: [{file: samples/sales.xlsx, location: Sheet 2}]
+    facts: ["45"]
+
+  - id: monthly-products
+    question: Which products are listed in the monthly sales data?
+    sources: [{file: samples/sales.xlsx, location: Sheet 1}]
+    facts: ["Widget Pro", "Gadget"]

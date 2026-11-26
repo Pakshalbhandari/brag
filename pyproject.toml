@@ -7,13 +7,13 @@ build-backend = "hatchling.build"
 # "brag-rag". The import name and CLI command are both "brag".
 name = "brag-rag"
 dynamic = ["version"]
-description = "RAG over DOCX/PPTX/XLSX with Docling, Chonkie and RAG-Anything"
+description = "RAG over PDF, DOCX, PPTX and XLSX with Docling, Chonkie and RAG-Anything"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Pakshal" }]
-keywords = ["rag", "retrieval-augmented-generation", "docling", "lightrag", "raganything", "office", "docx", "pptx", "xlsx", "claude"]
+keywords = ["rag", "retrieval-augmented-generation", "docling", "lightrag", "raganything", "office", "pdf", "docx", "pptx", "xlsx", "claude"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -27,7 +27,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "anthropic>=1.14.0",
+    "anthropic>=2.14,<3",
     "chonkie>=1.7.0",
     "docling>=2.139.0",
     "openpyxl>=3.1.5",
@@ -40,8 +40,19 @@ dependencies = [
     "sentence-transformers>=6.1.0",
 ]
 
+[project.optional-dependencies]
+# Drivers for LightRAG storage backends (see KV_STORAGE, VECTOR_STORAGE, ...).
+postgres = ["asyncpg>=0.31,<1"]
+neo4j = ["neo4j>=5,<7"]
+qdrant = ["qdrant-client>=1.11,<2"]
+milvus = ["pymilvus>=2.6.2,<3"]
+mongo = ["pymongo>=4,<5"]
+redis = ["redis>=5,<8"]
+# Client for Google Vertex AI (LLM_PROVIDER=vertex).
+vertex = ["anthropic[vertex]>=2.14,<3"]
+
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = ["pytest>=8.3", "reportlab>=4.0"]
 
 [project.urls]
 Homepage = "https://github.com/Pakshalbhandari/brag"
